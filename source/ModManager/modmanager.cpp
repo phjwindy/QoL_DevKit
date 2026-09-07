@@ -54,6 +54,7 @@
 // 日志（QoL_Shared）
 // ============================================================
 #include "logging.h"
+#include "selfverify.h"
 
 // 日志开关：发布版禁用日志
 // #define MODMANAGER_LOGGING
@@ -3257,6 +3258,7 @@ static void RequestRestart() {
 // ============================================================
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("modmanager");
+    if (!SelfVerifyInit("modmanager")) return;
     Log("[ModManager] mod_init — v1.1.2 build 25094764 v1.09\n");
 
     // 初始化手柄输入（三路混合：XInput 线程 + HID 直读线程 + joyGetPosEx 回退）

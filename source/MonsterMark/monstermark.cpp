@@ -34,6 +34,7 @@ using u32 = std::uint32_t;
 // 日志（QoL_Shared）
 // ============================================================
 #include "logging.h"
+#include "selfverify.h"
 
 // MonsterMark 日志开关：发布版禁用日志
 // 诊断版（F7 callback 暴力扫描）必须开启
@@ -279,6 +280,7 @@ static void NightDiagEnumerateHashTable();
 
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("monstermark");
+    if (!SelfVerifyInit("monstermark")) return;
     Log("[MonsterMark] mod_init — build 25094764 v1.09 %S\n", MONSTERMARK_VERSION);
     QolRegisterHotKey("monstermark", "none");  // 无热键（自动生效）
 

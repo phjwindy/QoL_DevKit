@@ -24,6 +24,7 @@ using u32 = std::uint32_t;
 // 日志（QoL_Shared）
 // ============================================================
 #include "logging.h"
+#include "selfverify.h"
 
 // ProductionAuto 日志开关：发布版禁用日志
 // #define PRODUCTIONAUTO_LOGGING  // 诊断版启用日志
@@ -753,6 +754,7 @@ static void ProductionHudRefresh();
 
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("productionauto");
+    if (!SelfVerifyInit("productionauto")) return;
     Log("[ProductionAuto] mod_init loaded, build %s %s\n",
         SUPPORTED_BUILD_NUMBER, SUPPORTED_GAME_VERSION);
 

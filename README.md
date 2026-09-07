@@ -1,3 +1,14 @@
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: 'bdb5a396-b16c-4b39-a8dc-918e6233862b'
+  PropagateID: 'bdb5a396-b16c-4b39-a8dc-918e6233862b'
+  ReservedCode1: 'abadbfbc-7929-49b0-a023-e07a59140205'
+  ReservedCode2: 'abadbfbc-7929-49b0-a023-e07a59140205'
+---
+
 # QoL of Village — 静谧田园生活质量 MOD 合集
 
 作者：PHJ&消失的清风  
@@ -35,6 +46,7 @@ GitHub：https://github.com/phjwindy/QoL_of_Village
 QoL_DevKit_Git/
 ├── steam_api64.dll        桥接基座（MOD 加载器，放游戏根目录）
 ├── steam_api64_README.md   基座说明文档
+├── embed_hash.py           DLL 篡改自校验：编译后哈希嵌入工具
 └── source/
     ├── QoL_Shared/        共享框架（8 个模块，所有 MOD 复用）
     ├── PluginTemplate/    新 MOD 脚手架模板
@@ -62,6 +74,7 @@ QoL_DevKit_Git/
 | `hotkey.h/.cpp` | 统一热键管理，支持键盘+手柄，运行时改键 |
 | `feature.h` | MOD 基础接口定义（mod_init/mod_tick/mod_unload） |
 | `safe_call.h` | SEH 安全的原生函数调用包装（解决 C2712） |
+| `selfverify.h/.cpp` | DLL 篡改自校验框架（编译后嵌入 SHA-256，运行时验证） |
 
 ### safe_call.h 使用要点
 
@@ -127,6 +140,21 @@ MOD 通过 `steam_api64.dll` 桥接基座加载，**只需安装一次**，后�
     ├── AutoHarvest_v1.8.4/AutoHarvest.dll
     ├── ChestSort_v1.3.4/ChestSort.dll
     └── ...
+```
+
+## 防篡改自校验机制
+
+所有 MOD DLL 集成了自校验框架（`selfverify.h/.cpp`），防止 DLL 被第三方篡改后损坏存档：1. 编译后由 `embed_hash.py` 计算完整 DLL 的 SHA-256（排除签名段），写入 DLL 内预留的签名段（`QOL_HASH_SIGNATURE`）
+2. 运行时 `mod_init` 阶段调用 `SelfVerifyInit()`，重新计算自身 DLL 的 SHA-256 与嵌入值比对
+3. 校验失败则日志留痕并禁用功能，避免被篡改的 DLL 损坏存档
+4. 开发阶段（未嵌入哈希）自动跳过校验，不影响开发调试
+
+### 编译后嵌入哈希
+
+```bash
+python embed_hash.py path/to/Mod.dll           # 单个 DLL
+python embed_hash.py path/to/mods/              # 批量处理目录下所有 .dll
+python embed_hash.py path/to/Mod.dll --verify    # 仅验证不写入
 ```
 
 ## 开发环境
@@ -213,3 +241,5 @@ Log("info: value=%d", val);
 > 本项目为个人兴趣开发的免费 MOD，不涉及任何商业用途。  
 > 游戏版权归原开发者所有，MOD 仅改善玩家体验，不修改游戏核心数据。  
 > 作者：PHJ&消失的清风，转载或分享时请注明出处。
+
+> AI生成

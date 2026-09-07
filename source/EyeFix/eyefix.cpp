@@ -27,6 +27,7 @@
 
 #include "logging.h"
 #include "hotkey.h"
+#include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出
 // 调试时取消注释下行即可开启日志
@@ -318,6 +319,7 @@ static void PollToggleSwitch() {
 // ============================================================
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("eyefix");
+    if (!SelfVerifyInit("eyefix")) return;
     Log("[EyeFix] mod_init 开始");
     G::base = (uintptr_t)GetModuleHandleW(nullptr);
     Log("[EyeFix] 游戏基址: 0x%llX", (unsigned long long)G::base);

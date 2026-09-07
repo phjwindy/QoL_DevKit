@@ -52,6 +52,7 @@
 #include <atomic>
 
 #include "logging.h"
+#include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出
 // 调试时取消注释下行即可开启日志
@@ -1584,6 +1585,7 @@ static void RestoreAllHooks() {
 }
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("autofish");
+    if (!SelfVerifyInit("autofish")) return;
     Log("[AutoFish] mod_init 开始 (v1.4.0)");
     QolRegisterHotKey("autofish", "9, F10");
 

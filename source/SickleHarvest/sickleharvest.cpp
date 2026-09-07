@@ -98,6 +98,7 @@
 
 #include "logging.h"
 #include "safe_call.h"
+#include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出
 // 调试时取消注释下行即可开启日志
@@ -1652,6 +1653,7 @@ static bool InstallSickleHarvestHook() {
 
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("sickleharvest");
+    if (!SelfVerifyInit("sickleharvest")) return;
     Log("[SickleHarvest] mod_init -- v2.2.2 v1.09 build 25094764\n");
     InstallSickleHarvestHook();
 }

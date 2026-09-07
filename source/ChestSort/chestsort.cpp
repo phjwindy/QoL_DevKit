@@ -65,6 +65,7 @@
 #include "logging.h"
 #include "aobscan.h"
 #include "hotkey.h"   // 共享热键运行时读取（游戏内改键链路）
+#include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出（不生成 qol_chestsort.log）
 // 如需调试，取消下一行注释即可恢复日志输出
@@ -1545,6 +1546,7 @@ static void PollInput() {
 // ============================================================
 extern "C" __declspec(dllexport) void mod_init(void) {
     LogOpen("chestsort");
+    if (!SelfVerifyInit("chestsort")) return;
     Log("[ChestSort] mod_init 开始");
 
     // 共享热键初始化：读 qol_hotkeys.txt 中 chestsort 行的键盘键。
