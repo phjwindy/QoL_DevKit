@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'c934ba50-cac7-4738-b581-6c5ecfcf12ef'
-  PropagateID: 'c934ba50-cac7-4738-b581-6c5ecfcf12ef'
-  ReservedCode1: '4e52c102-2569-4cbd-8d2f-74d783da1256'
-  ReservedCode2: '4e52c102-2569-4cbd-8d2f-74d783da1256'
+  ProduceID: '24828ff7-9e32-4c59-a40b-753dbb3a63fc'
+  PropagateID: '24828ff7-9e32-4c59-a40b-753dbb3a63fc'
+  ReservedCode1: '54bf6817-01af-463c-9be1-f8aca7a898b6'
+  ReservedCode2: '54bf6817-01af-463c-9be1-f8aca7a898b6'
 ---
 
 # QoL DevKit — Village in the Shade MOD 开发套件
@@ -72,14 +72,14 @@ bool ok = qol::SafeCallOutBool1(g_someFunc, status, &code);
 | MOD | 功能 | 当前版本 | 状态 |
 |-----|------|----------|------|
 | AutoFish | 钓鱼小游戏自动完成+循环抛竿+垃圾排除 | v1.4.0 | 已验证 |
-| AutoHarvest | F4 收集范围内树液提取器树液 | v1.8.4 | 待实测 |
+| AutoHarvest | F4 收集范围内树液提取器树液 | v1.8.4 | 已验证 |
 | ChestSort | 数字键 4 触发箱子内物品自动归类 | v1.3.4 | 已验证 |
 | EyeFix | 数字键 0 切换：结局眼↔正常眼 | v1.1.2 | 已验证 |
-| ModManager | F2 面板管理 MOD 开关，手柄 L1+R1 | v1.1.4 | 待实测 |
-| MonsterMark | 夜间自动标记鬼鼠/宝箱/书籍/齿轮 | v1.0.28 | 待实测 |
+| ModManager | F2 面板管理 MOD 开关，手柄 L1+R1 | v1.1.4 | 已验证 |
+| MonsterMark | 夜间自动标记鬼鼠/宝箱/书籍/齿轮 | v1.0.28 | 已验证 |
 | ProductionAuto | F5 切 HUD，自动投料/收料/设备绑定 | v1.1.25 | 已验证 |
-| Scarecrow | 稻草人与洒水器可放置在同一格 | v1.0.3 | 待实测 |
-| SickleHarvest | 挥镰刀范围收割成熟作物+果树摇树+木耳 | v2.2.4 | 开发中 |
+| Scarecrow | 稻草人与洒水器可放置在同一格 | v1.0.3 | 已验证 |
+| SickleHarvest | 挥镰刀范围收割成熟作物+果树摇树+木耳 | v2.2.4 | 已验证 |
 | Sower | 数字键 5 切换 1x1/3x3/5x5/连通播种 | v1.3.3 | 已验证 |
 
 ## 开发环境
