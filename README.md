@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '05346f39-c7d1-4fb1-952a-824bad8ef78e'
-  PropagateID: '05346f39-c7d1-4fb1-952a-824bad8ef78e'
-  ReservedCode1: '7e14778c-4c57-4539-99eb-f3f74bbf82c6'
-  ReservedCode2: '7e14778c-4c57-4539-99eb-f3f74bbf82c6'
----
-
 # QoL of Village — 静谧田园生活质量 MOD 合集
 
 作者：PHJ&消失的清风  
@@ -253,5 +242,3 @@ Log("info: value=%d", val);
 > 本项目为个人兴趣开发的免费 MOD，不涉及任何商业用途。  
 > 游戏版权归原开发者所有，MOD 仅改善玩家体验，不修改游戏核心数据。  
 > 作者：PHJ&消失的清风，转载或分享时请注明出处。
-
-> AI生成
