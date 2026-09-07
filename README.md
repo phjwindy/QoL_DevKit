@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'd055d363-4d53-4959-87ac-b9a476bbe743'
-  PropagateID: 'd055d363-4d53-4959-87ac-b9a476bbe743'
-  ReservedCode1: 'a8054afa-09b0-4d7f-9059-29e6c1a8d976'
-  ReservedCode2: 'a8054afa-09b0-4d7f-9059-29e6c1a8d976'
+  ProduceID: 'ddf6ba2e-9f44-476a-8d62-2a20b37c7e65'
+  PropagateID: 'ddf6ba2e-9f44-476a-8d62-2a20b37c7e65'
+  ReservedCode1: '37e936f3-4329-4ed2-b564-7b11722a053c'
+  ReservedCode2: '37e936f3-4329-4ed2-b564-7b11722a053c'
 ---
 
 # QoL DevKit — Village in the Shade MOD 开发套件
@@ -24,18 +24,20 @@ AIGC:
 QoL_DevKit_Git/
 ├── steam_api64.dll        桥接基座（MOD 加载器，放游戏根目录）
 ├── steam_api64_README.md   基座说明文档
-├── QoL_Shared/            共享框架（6 个模块，所有 MOD 复用）
-├── PluginTemplate/        新 MOD 脚手架模板
-├── AutoFish/              自动钓鱼
-├── AutoHarvest/           树液自动收集
-├── ChestSort/             箱子快速归类
-├── EyeFix/                结局后保持正常眼
-├── ModManager/            游戏内 MOD 开关管理器
-├── MonsterMark/           夜间怪物/宝箱地图标记
-├── ProductionAuto/        生产链自动化（投料/收料/绑定）
-├── Scarecrow/             稻草人与洒水器重叠
-├── SickleHarvest/         镰刀范围收割
-└── Sower/                 范围播种
+├── embed_hash.py          DLL 防篡改哈希嵌入工具（编译后运行）
+└── source/
+    ├── QoL_Shared/        共享框架（8 个模块，所有 MOD 复用）
+    ├── PluginTemplate/    新 MOD 脚手架模板
+    ├── AutoFish/          自动钓鱼
+    ├── AutoHarvest/       树液自动收集
+    ├── ChestSort/         箱子快速归类
+    ├── EyeFix/            结局后保持正常眼
+    ├── ModManager/        游戏内 MOD 开关管理器
+    ├── MonsterMark/       夜间怪物/宝箱地图标记
+    ├── ProductionAuto/    生产链自动化（投料/收料/绑定）
+    ├── Scarecrow/         稻草人与洒水器重叠
+    ├── SickleHarvest/     镰刀范围收割
+    └── Sower/             范围播种
 ```
 
 ## 共享框架（QoL_Shared）
@@ -49,6 +51,7 @@ QoL_DevKit_Git/
 | `hook.h/.cpp` | Trampoline Hook 安装/卸载，支持热移除 |
 | `hotkey.h/.cpp` | 统一热键管理，支持键盘+手柄，运行时改键 |
 | `feature.h` | MOD 基础接口定义（mod_init/mod_tick/mod_unload） |
+| `selfverify.h/.cpp` | DLL 自校验框架（防篡改，mod_init 阶段验证自身 SHA-256） |
 | `safe_call.h` | SEH 安全的原生函数调用包装（解决 C2712） |
 
 ### safe_call.h 使用要点
@@ -154,6 +157,33 @@ MOD 通过 `steam_api64.dll` 桥接基座加载，**只需安装一次**，后�
 | `map_find` | 0x150B10 | 哈希表查找 |
 | `HarvestSettle` | 0x211DD0 | 作物收割结算（SickleHarvest 木耳关键） |
 
+## 防篡改机制
+
+每个 MOD DLL 内嵌自校验框架，防止二进制被篡改后运行导致存档损坏。
+
+### 原理
+
+1. 源码中链接 `selfverify.cpp`，内含 64 字节签名段（magic + SHA-256 占位）
+2. MSVC 编译产出 DLL 后，运行 `python embed_hash.py <DLL路径>` 嵌入哈希
+3. 运行时 `mod_init` 调用 `SelfVerifyInit()`，重新计算自身 DLL 的 SHA-256（排除签名段），与嵌入值比对
+4. 不匹配 → 日志留痕（`qol_<feature>.log` 中 `SELF-VERIFY FAILED`）+ 功能禁用
+
+### 编译流程
+
+```
+1. MSBuild 编译产出 DLL（此时签名段为全零占位）
+2. python embed_hash.py Mods\AutoFish_v1.4.0\AutoFish.dll
+3. 部署到游戏目录
+```
+
+> 开发阶段直接编译的 DLL（未嵌入哈希）会跳过校验，不影响调试。
+
+### 验证已部署 DLL
+
+```
+python embed_hash.py Mods\AutoFish_v1.4.0\AutoFish.dll --verify
+```
+
 ## 开发原则
 
 1. **原生函数优先**：涉及游戏系统交互时，优先调用原生函数（AOB 定位→直接调用），而非自写逆向逻辑。原生函数天然兼容所有槽位数和容器类型，自写逻辑天然脆弱
@@ -193,8 +223,8 @@ Log("info: value=%d", val);
 
 ## 致谢
 
-- **BigL233**：基座 `steam_api64.dll` 桥接加载器的源码作者，为本项目提供了 MOD 加载的基础设施
-- **小黑盒用户「哀喜」**：在 MOD 开发过程中提供了协助
+- **BigL233**：MOD 源码作者，本项目 QoL MOD 合集的原始代码基础
+- **小黑盒用户「哀喜」**：基座 `steam_api64.dll` 桥接加载器源码作者及开发提点
 
 ---
 
