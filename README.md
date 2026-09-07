@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '179db02b-22b6-4325-9b0d-3ae59470a774'
-  PropagateID: '179db02b-22b6-4325-9b0d-3ae59470a774'
-  ReservedCode1: '62b1988a-e979-464f-b97c-99a312e1ded7'
-  ReservedCode2: '62b1988a-e979-464f-b97c-99a312e1ded7'
+  ProduceID: 'c934ba50-cac7-4738-b581-6c5ecfcf12ef'
+  PropagateID: 'c934ba50-cac7-4738-b581-6c5ecfcf12ef'
+  ReservedCode1: '4e52c102-2569-4cbd-8d2f-74d783da1256'
+  ReservedCode2: '4e52c102-2569-4cbd-8d2f-74d783da1256'
 ---
 
 # QoL DevKit — Village in the Shade MOD 开发套件
@@ -16,7 +16,7 @@ AIGC:
 
 ## 项目简介
 
-《Village in the Shade》（树荫之村）QoL（Quality of Life）MOD 合集，基于 C++ DLL 插件架构，通过 AOB 签名定位 + 函数 Hook 实现游戏体验优化。当前适配游戏版本 **v1.09 (build 25094764)**。
+《Village in the Shade》（静谧田园）QoL（Quality of Life）MOD 合集，基于 C++ DLL 插件架构，通过 AOB 签名定位 + 函数 Hook 实现游戏体验优化。当前适配游戏版本 **v1.09 (build 25094764)**。
 
 ## 目录结构
 
