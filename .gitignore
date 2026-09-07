@@ -19,3 +19,6 @@ __pycache__/
 *.bak*
 *.new
 *.orig
+
+# 说明文档（不入库）
+README_GIT.md
