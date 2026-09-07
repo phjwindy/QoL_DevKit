@@ -1,0 +1,21 @@
+# 构建产物
+bin/
+obj/
+*.obj
+*.pdb
+*.lib
+*.exp
+*.dll
+*.exe
+*.tlog
+*.recipe
+
+# 临时/归档
+.temp/
+__pycache__/
+*.pyc
+
+# 备份
+*.bak*
+*.new
+*.orig
