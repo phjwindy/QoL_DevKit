@@ -3,16 +3,38 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'ddf6ba2e-9f44-476a-8d62-2a20b37c7e65'
-  PropagateID: 'ddf6ba2e-9f44-476a-8d62-2a20b37c7e65'
-  ReservedCode1: '37e936f3-4329-4ed2-b564-7b11722a053c'
-  ReservedCode2: '37e936f3-4329-4ed2-b564-7b11722a053c'
+  ProduceID: '05346f39-c7d1-4fb1-952a-824bad8ef78e'
+  PropagateID: '05346f39-c7d1-4fb1-952a-824bad8ef78e'
+  ReservedCode1: '7e14778c-4c57-4539-99eb-f3f74bbf82c6'
+  ReservedCode2: '7e14778c-4c57-4539-99eb-f3f74bbf82c6'
 ---
 
-# QoL DevKit — Village in the Shade MOD 开发套件
+# QoL of Village — 静谧田园生活质量 MOD 合集
 
-> 作者：PHJ&消失的清风  
-> 转载或分享时请注明出处。
+作者：PHJ&消失的清风  
+适配：Steam build 25094764（v1.09）  
+GitHub：https://github.com/phjwindy/QoL_of_Village  
+小黑盒发布页：https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?h_camp=link&h_src=YXBwX3NoYXJl&link_id=42907269165c&new_post_share_style=true  
+转载或分享时请注明出处。
+
+> ⚠️ 本 MOD 合集仅适配游戏 v1.09 版本（build 25094764），其他版本请勿使用，可能导致功能异常或存档损坏。
+
+## MOD 列表
+
+| MOD | 功能 |
+|-----|------|
+| AutoFish | 自动钓鱼——钓鱼小游戏自动完成，循环抛竿，可一键排除垃圾鱼 |
+| AutoHarvest | 树液自动收集——按 F4 一键收取范围内的树液提取器 |
+| ChestSort | 箱子快速归类——打开箱子按数字键 4，物品自动整理归类 |
+| EyeFix | 视角切换——按数字键 0 在结局眼与正常眼之间切换 |
+| ModManager | MOD 管理器——按 F2 打开面板管理各 MOD 开关，手柄 L1+R1 也可呼出 |
+| MonsterMark | 夜间地图标记——自动标记鬼鼠、宝箱、书籍、齿轮等锚点位置 |
+| ProductionAuto | 生产链自动化——自动投料、收料、设备绑定，按 F5 切换 HUD |
+| Scarecrow | 稻草人与洒水器重叠——允许两者放置在同一格，不再冲突 |
+| SickleHarvest | 镰刀范围收割——挥一次镰刀收割范围内所有成熟作物，果树自动摇树，木耳也能收 |
+| Sower | 范围播种——按数字键 5 切换 1x1/3x3/5x5/连通播种模式 |
+
+---
 
 ## 项目简介
 
