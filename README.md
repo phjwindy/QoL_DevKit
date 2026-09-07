@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '24828ff7-9e32-4c59-a40b-753dbb3a63fc'
-  PropagateID: '24828ff7-9e32-4c59-a40b-753dbb3a63fc'
-  ReservedCode1: '54bf6817-01af-463c-9be1-f8aca7a898b6'
-  ReservedCode2: '54bf6817-01af-463c-9be1-f8aca7a898b6'
+  ProduceID: '6f548af4-38e0-4f15-b71b-80b78f1c5042'
+  PropagateID: '6f548af4-38e0-4f15-b71b-80b78f1c5042'
+  ReservedCode1: '39a74291-f6c3-4b5d-b801-165a79dfe8a2'
+  ReservedCode2: '39a74291-f6c3-4b5d-b801-165a79dfe8a2'
 ---
 
 # QoL DevKit — Village in the Shade MOD 开发套件
@@ -126,36 +126,6 @@ bool ok = qol::SafeCallOutBool1(g_someFunc, status, &code);
 3. **诊断优先于改码**：功能异常先读日志定位根因，不臆测
 4. **发布版干净**：发布版关闭所有诊断日志，不残留调试代码
 5. **备份先行**：修改源码前必须备份原文件
-
-## 后续开发线索
-
-### SickleHarvest 木耳收割（已实现 v2.2.0+）
-
-完整诊断历程（v1.2.1~v2.2.0 共 10 轮诊断）已沉淀，核心结论：
-- 木耳不在 spatialSearch 空间索引中，不走命令处理器/Retrieve 状态机
-- 原生镰刀接受木耳目标但直接放行不执行 HarvestSettle
-- 最终方案：MOD 侧对原生接受的目标执行 HarvestSettle 收割，但**不写回目标列表**（避免原生重复处理导致双倍产出）
-- 调用链：HarvestSettle(0x211DD0) → ShakeTreeSettle(0x19D320) → item_ctor(0xFF870)，itemId=0x187E0
-
-### 镰刀范围收割长期目标
-
-覆盖三类：**采集物、作物、花**。当前作物+果树+木耳已完成，花类尚未覆盖。
-
-### MonsterMark 山顶标记
-
-山顶区域 2 个锚点（零件/书）在原生锚点查询 (0x1C1A00) 中返回 found=0，用户接受现状暂过关。后续可尝试：
-- 跟踪原生锚点查询的 areaId 参数，确认山顶区域 ID 是否被正确传入
-- 或换用 spatialSearch 补充扫描山顶锚点
-
-### ProductionAuto 链式自动化
-
-已有投料/收料/设备绑定/地板互联功能。潜在优化方向：
-- 蚕盒链路产出转移的稳定性验证
-- HUD 绑定数漂移的长期监控
-
-### EyeFix
-
-源码中缺少版本号标识（其他 MOD 在 .cpp 头部注释中有 `v1.x.x`），建议补充版本注释便于追踪。
 
 ## 插件开发快速上手
 
