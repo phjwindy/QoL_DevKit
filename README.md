@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '6f548af4-38e0-4f15-b71b-80b78f1c5042'
-  PropagateID: '6f548af4-38e0-4f15-b71b-80b78f1c5042'
-  ReservedCode1: '39a74291-f6c3-4b5d-b801-165a79dfe8a2'
-  ReservedCode2: '39a74291-f6c3-4b5d-b801-165a79dfe8a2'
+  ProduceID: 'd055d363-4d53-4959-87ac-b9a476bbe743'
+  PropagateID: 'd055d363-4d53-4959-87ac-b9a476bbe743'
+  ReservedCode1: 'a8054afa-09b0-4d7f-9059-29e6c1a8d976'
+  ReservedCode2: 'a8054afa-09b0-4d7f-9059-29e6c1a8d976'
 ---
 
 # QoL DevKit — Village in the Shade MOD 开发套件
@@ -22,18 +22,20 @@ AIGC:
 
 ```
 QoL_DevKit_Git/
-├── QoL_Shared/          共享框架（6 个模块，所有 MOD 复用）
-├── PluginTemplate/      新 MOD 脚手架模板
-├── AutoFish/            自动钓鱼
-├── AutoHarvest/         树液自动收集
-├── ChestSort/           箱子快速归类
-├── EyeFix/              结局后保持正常眼
-├── ModManager/          游戏内 MOD 开关管理器
-├── MonsterMark/         夜间怪物/宝箱地图标记
-├── ProductionAuto/      生产链自动化（投料/收料/绑定）
-├── Scarecrow/           稻草人与洒水器重叠
-├── SickleHarvest/       镰刀范围收割
-└── Sower/               范围播种
+├── steam_api64.dll        桥接基座（MOD 加载器，放游戏根目录）
+├── steam_api64_README.md   基座说明文档
+├── QoL_Shared/            共享框架（6 个模块，所有 MOD 复用）
+├── PluginTemplate/        新 MOD 脚手架模板
+├── AutoFish/              自动钓鱼
+├── AutoHarvest/           树液自动收集
+├── ChestSort/             箱子快速归类
+├── EyeFix/                结局后保持正常眼
+├── ModManager/            游戏内 MOD 开关管理器
+├── MonsterMark/           夜间怪物/宝箱地图标记
+├── ProductionAuto/        生产链自动化（投料/收料/绑定）
+├── Scarecrow/             稻草人与洒水器重叠
+├── SickleHarvest/         镰刀范围收割
+└── Sower/                 范围播种
 ```
 
 ## 共享框架（QoL_Shared）
@@ -81,6 +83,39 @@ bool ok = qol::SafeCallOutBool1(g_someFunc, status, &code);
 | Scarecrow | 稻草人与洒水器可放置在同一格 | v1.0.3 | 已验证 |
 | SickleHarvest | 挥镰刀范围收割成熟作物+果树摇树+木耳 | v2.2.4 | 已验证 |
 | Sower | 数字键 5 切换 1x1/3x3/5x5/连通播种 | v1.3.3 | 已验证 |
+
+## 安装说明
+
+### 1. 安装桥接基座
+
+MOD 通过 `steam_api64.dll` 桥接基座加载，**只需安装一次**，后续增减 MOD 无需重装：
+
+1. 关闭游戏
+2. 将游戏根目录原有的 `steam_api64.dll` 改名为 `steam_api64_org.dll`
+3. 把本仓库的 `steam_api64.dll` 复制到游戏根目录
+4. 直接从 Steam 启动游戏即可
+
+> 如需卸载基座：删除 `steam_api64.dll`，把 `steam_api64_org.dll` 改回 `steam_api64.dll` 即可完全恢复原版。
+>
+> 详细说明见 [steam_api64_README.md](steam_api64_README.md)
+
+### 2. 安装 MOD
+
+1. 编译产出 DLL（或获取已编译的 DLL）
+2. 在游戏根目录的 `Mods\` 文件夹下创建子目录：`Mods\<MOD名>_v<版本号>\`
+3. 将 DLL 放入对应子目录
+4. 启动游戏，MOD 自动加载
+
+```
+游戏根目录/
+├── steam_api64.dll          ← 桥接基座
+├── steam_api64_org.dll       ← 原 Steamworks DLL（改名而来）
+└── Mods/
+    ├── AutoFish_v1.4.0/AutoFish.dll
+    ├── AutoHarvest_v1.8.4/AutoHarvest.dll
+    ├── ChestSort_v1.3.4/ChestSort.dll
+    └── ...
+```
 
 ## 开发环境
 
@@ -155,6 +190,11 @@ LogOpen("myfeature");  // mod_init 中，创建 qol_myfeature.log
 Log("info: value=%d", val);
 // 发布版通过注释 #define 关闭日志
 ```
+
+## 致谢
+
+- **BigL233**：基座 `steam_api64.dll` 桥接加载器的源码作者，为本项目提供了 MOD 加载的基础设施
+- **小黑盒用户「哀喜」**：在 MOD 开发过程中提供了协助
 
 ---
 
