@@ -20,5 +20,6 @@ __pycache__/
 *.new
 *.orig
 
-# 说明文档（不入库）
+# 本地说明文档（不入库）
 README_GIT.md
+!README.md

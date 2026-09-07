@@ -1,3 +1,8 @@
+// ================================================
+// 作者：PHJ&消失的清风
+// 项目：Village in the Shade QoL MOD Pack
+// 转载或分享时请注明出处
+// ================================================
 // scarecrow.cpp —— 稻草人与洒水器重叠 (v1.0.3)
 //
 // v1.0.3: SEH 保护 g_currentWorldKey/g_resolveGeometryStatus；发布版关闭日志。

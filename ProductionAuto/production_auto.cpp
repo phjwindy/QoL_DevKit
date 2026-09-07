@@ -1,3 +1,8 @@
+// ================================================
+// 作者：PHJ&消失的清风
+// 项目：Village in the Shade QoL MOD Pack
+// 转载或分享时请注明出处
+// ================================================
 #include "version_manifest.h"
 #include <windows.h>
 #include <wincrypt.h>
