@@ -1,8 +1,3 @@
-// ================================================
-// 作者：PHJ&消失的清风
-// 项目：Village in the Shade QoL MOD Pack
-// 转载或分享时请注明出处
-// ================================================
 // monstermark.cpp —— MonsterMark: Ghost Rat / Treasure Box 地图标记 (v1.0.26)
 //
 // v1.0.26: 生产路径 6 处原生函数调用补 SEH 保护（NightCollectTargets 等）。

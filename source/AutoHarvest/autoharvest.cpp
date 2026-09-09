@@ -1,10 +1,11 @@
-// ================================================
-// 作者：PHJ&消失的清风
-// 项目：Village in the Shade QoL MOD Pack
-// 转载或分享时请注明出处
-// ================================================
-// autoharvest.cpp —— AutoHarvest: 自动收集树液提取器中的树液 (v1.8.1)
+// autoharvest.cpp —— AutoHarvest: 自动收集树液提取器中的树液 (v1.8.7)
 //
+// v1.8.7: 代码审计修复——①增量触发缓存提取器列表（保底路径复用指针不跳过采集）；
+//         ②DWORD 无符号溢出修复首次延迟；③TransferToChest AddRef/Release 对称化；
+//         ④诊断数据采集移除（发布版不再执行哈希表查找）；⑤日志先赋值再打印修复；
+//         ⑥多槽提取器 count 键 fallback 修复。
+// v1.8.6: 掉帧优化——①搜索半径 10000→5000；②增量触发+帧内预算；③移除诊断计时。
+// v1.8.5-diag: FPS 掉帧排查诊断版
 // v1.8.1: ① F9 诊断触发器移除（发布版不应有诊断代码）；
 // v1.8.0: 死档风险修复（3 项高危）：
 //          ① AH-H1: 删除 SapClearExtractorSlot 死代码（含手写引用计数+vtable 析构+nullptr 写 backing）
@@ -46,7 +47,6 @@
 
 #include "logging.h"
 #include "hotkey.h"
-#include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出
 // 调试时取消注释下行即可开启日志
@@ -159,7 +159,7 @@ enum AOBIndex {
 static constexpr size_t kAOBCount = sizeof(kAOBs) / sizeof(kAOBs[0]);
 
 // ---- 采集参数 ----
-static constexpr float  HARVEST_RADIUS = 10000.0f;     // 搜索半径（覆盖庭院范围）
+static constexpr float  HARVEST_RADIUS = 5000.0f;      // v1.8.6: 搜索半径（覆盖庭院范围，原 10000 全图过大）
 static constexpr float  HARVEST_RADIUS_SQ = HARVEST_RADIUS * HARVEST_RADIUS;
 static constexpr float  CHEST_SET_RADIUS = 300.0f;   // F4 设置箱子的搜索半径
 static constexpr float  CHEST_SET_RADIUS_SQ = CHEST_SET_RADIUS * CHEST_SET_RADIUS;
@@ -286,8 +286,11 @@ namespace G {
 
     // 采集周期控制
     DWORD lastHarvestTick = 0;
-    static constexpr DWORD HARVEST_INTERVAL_MS = 5000;  // 每 5 秒一个周期（优化卡顿）
-    size_t extractorRotateOffset = 0; // 提取器轮转起点
+    static constexpr DWORD HARVEST_INTERVAL_MS = 5000;  // 每 5 秒一个周期
+    static constexpr DWORD HARVEST_BACKSTOP_MS = 15000;  // 增量触发保底
+    size_t extractorRotateOffset = 0;
+    size_t lastExtractorCount = (size_t)-1;
+    DWORD lastFullScanTick = 0;
 
 }
 
@@ -789,6 +792,11 @@ struct SapExtractorCandidate {
     float distSq;
 };
 
+// v1.8.7: 持久化提取器缓存——保底路径复用此列表跳过搜索但仍采集
+static SapExtractorCandidate g_cachedExtractors[64] = {};
+static size_t g_cachedExtractorCount = 0;
+
+// v1.8.6: 搜索结果过滤加帧内预算——超过 2ms 自动截断（候选量受缩半径已大减，此处是安全网）
 static size_t SearchSapExtractors(void* spatialIndex, const float* playerPos,
                                   SapExtractorCandidate* candidates, size_t maxCount) {
     if (!spatialIndex || !playerPos || !candidates) return 0;
@@ -807,8 +815,23 @@ static size_t SearchSapExtractors(void* spatialIndex, const float* playerPos,
     }
     size_t rawCount = results.end - results.begin;
 
+    // v1.8.6: 帧内预算——过滤循环超过 2ms 自动截断
+    LARGE_INTEGER budgetStart, budgetFreq;
+    QueryPerformanceCounter(&budgetStart);
+    QueryPerformanceFrequency(&budgetFreq);
+    const LONGLONG budgetLimit = budgetFreq.QuadPart / 500;  // 2ms = 1/500 秒
+
     size_t count = 0;
     for (size_t i = 0; i < rawCount && count < maxCount; ++i) {
+        // v1.8.6: 每 64 个候选检查一次预算
+        if ((i & 63) == 63) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart - budgetStart.QuadPart > budgetLimit) {
+                Log("[AutoHarvest] 搜索过滤超 2ms 预算，截断于 %zu/%zu", i, rawCount);
+                break;
+            }
+        }
         void* status = results.begin[i];
         if (!status) continue;
         if (!IsSapExtractorStatus(status)) continue;
@@ -880,44 +903,55 @@ static size_t TransferToChest(void* player, void* chestStatus) {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(
             reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
 
-        if (!G::itemAdjust) continue;
+        if (!G::itemAdjust) goto skip_item;
         const int moveCount = info.stackCount;
         int targetBefore = 0;
-        if (!ReadStackCount(targetItem, &targetBefore)) continue;
+        if (!ReadStackCount(targetItem, &targetBefore)) goto skip_item;
 
         // 容量校验
         if (G::commandCapacity) {
             CommandItem descriptor = {};
             descriptor.item = targetItem;
             const int remainingCap = G::commandCapacity(&descriptor);
-            if (remainingCap < moveCount) continue;
+            if (remainingCap < moveCount) goto skip_item;
         }
 
         G::itemAdjust(targetItem, moveCount);
         int targetAfter = 0;
         if (!ReadStackCount(targetItem, &targetAfter) || targetAfter != targetBefore + moveCount) {
             G::itemAdjust(targetItem, -moveCount);
-            continue;
+            goto skip_item;
         }
         G::itemAdjust(item, -moveCount);
         int sourceAfter = 0;
         if (!ReadStackCount(item, &sourceAfter) || sourceAfter != 0) {
             G::itemAdjust(targetItem, -moveCount);
             G::itemAdjust(item, moveCount);
-            continue;
+            goto skip_item;
         }
 
+        // v1.8.7: 先释放保护性 AddRef，再 intrusiveRelease 背包引用（释放顺序统一）
         // 清空背包槽位指针并释放引用
-        void* observed = InterlockedCompareExchangePointer(
-            reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
-        if (observed == item) {
-            void* slotOwnedRef = item;
-            if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);
+        {
+            void* observed = InterlockedCompareExchangePointer(
+                reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
+            if (observed == item) {
+                InterlockedDecrement(reinterpret_cast<volatile LONG*>(
+                    reinterpret_cast<uintptr_t>(item) + sizeof(void*)));  // 释放保护性 AddRef
+                void* slotOwnedRef = item;
+                if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);  // 释放背包引用
+            }
         }
 
         movedStacks++;
         movedItems += moveCount;
         Log("[AutoHarvest] [transfer] itemId=%llu rank=%d x%d", info.itemId, info.rank, moveCount);
+        continue;
+
+    skip_item:
+        // v1.8.7: 所有失败路径统一在此释放保护性 AddRef
+        InterlockedDecrement(reinterpret_cast<volatile LONG*>(
+            reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
     }
 
     // 收尾三件套
@@ -1239,6 +1273,16 @@ static bool SapTransferSlot(void* player, void* extractorStatus, void* chestStat
                 extractorStatus, slot, countKey);
             return false;
         }
+    } else if (slot > 0) {
+        // v1.8.7: count 主键存在且非 0，但 slot>0 时不能直接用主键值——
+        // 先尝试 count{slot} 后缀键，失败则回退到主键值
+        char slotKey[12] = {};
+        _snprintf_s(slotKey, sizeof(slotKey), _TRUNCATE, "count%zu", slot);
+        u64 slotValue = 0;
+        if (SapReadStatusMapValue(extractorStatus, SAP_STATUS_ITEMVAL_MAP_OFFSET, slotKey, &slotValue, true)) {
+            countValue = slotValue;  // 后缀键存在，用专用值
+        }
+        // 后缀键不存在则保持主键的 countValue（单槽提取器兼容行为）
     }
     const int amount = (int)countValue;
 
@@ -1553,41 +1597,8 @@ static size_t CollectFromSapExtractor(void* player, void* extractorStatus, void*
         return 0;
     }
 
-    // v1.6.1-diag: 打印提取器 slotLimit 和每个槽位的完整状态（时间戳+map数据）
-    Log("[AutoHarvest] [sap-diag] extractor=%p slotLimit=%zu", extractorStatus, slotLimit);
-    for (size_t s = 0; s < slotLimit; ++s) {
-        // 读时间戳
-        uintptr_t startOff = (uintptr_t)extractorStatus + SAP_STATUS_TIME_VALUE_OFFSET + s * sizeof(u64);
-        uintptr_t durOff   = (uintptr_t)extractorStatus + SAP_STATUS_CREATE_TIME_OFFSET + s * sizeof(u64);
-        u64 st = 0, du = 0;
-        if (IsReadable((void*)startOff, sizeof(u64)) && IsReadable((void*)durOff, sizeof(u64))) {
-            st = *(const u64*)startOff;
-            du = *(const u64*)durOff;
-        }
-        // 读 itemID{s}
-        char idKey[8] = {};
-        _snprintf_s(idKey, sizeof(idKey), _TRUNCATE, "itemID%zu", s);
-        u64 idv = 0;
-        SapReadStatusMapValue(extractorStatus, SAP_STATUS_ITEMID_MAP_OFFSET, idKey, &idv, false);
-        // 读 count + count{s}
-        char cntKey[12] = {};
-        _snprintf_s(cntKey, sizeof(cntKey), _TRUNCATE, "count");
-        u64 cv = 0;
-        SapReadStatusMapValue(extractorStatus, SAP_STATUS_ITEMVAL_MAP_OFFSET, cntKey, &cv, true);
-        char cntKey2[12] = {};
-        _snprintf_s(cntKey2, sizeof(cntKey2), _TRUNCATE, "count%zu", s);
-        u64 cv2 = 0;
-        SapReadStatusMapValue(extractorStatus, SAP_STATUS_ITEMVAL_MAP_OFFSET, cntKey2, &cv2, true);
-        // 读游戏时间
-        std::int64_t now = 0;
-        ReadGameRawSecond(&now);
-        u64 end = st + du;
-        Log("[AutoHarvest] [sap-diag]   slot=%zu start=%llu dur=%llu end=%llu now=%lld itemID=%llu count=%llu count%zu=%llu",
-            s, (unsigned long long)st, (unsigned long long)du,
-            (unsigned long long)end, (long long)now,
-            (unsigned long long)idv, (unsigned long long)cv,
-            s, (unsigned long long)cv2);
-    }
+    // v1.8.7: 移除诊断数据采集（原 L1574-1608 的 slotLimit 遍历 + 哈希表查找 + ReadGameRawSecond）
+    // 发布版 Log() 为空操作，但那些代码是独立语句不是 Log 参数内，仍会执行 ~48 次/周期的哈希表查找
 
     size_t movedStacks = 0;
     size_t totalItems = 0;
@@ -1765,7 +1776,7 @@ static void ProbeNativeCollect() {
             char idKey[8] = {};
             char countKey[9] = {};
             _snprintf_s(idKey, sizeof(idKey), _TRUNCATE, "itemID%zu", slot);
-            _snprintf_s(countKey, sizeof(countKey), _TRUNCATE, "count", slot);
+            _snprintf_s(countKey, sizeof(countKey), _TRUNCATE, "count");
             u64 itemId = 0;
             u64 countValue = 0;
             if (!SapReadStatusMapValue(extractorStatus, SAP_STATUS_ITEMID_MAP_OFFSET,
@@ -1916,9 +1927,35 @@ static void DoHarvestCycle(WorldContext* ctx) {
         totalHarvested += moved;
     }
 
-    // ---- 第二步：收集树液提取器（分批轮转）----
+    // ---- 第二步：收集树液提取器（增量触发 + 分批轮转）----
+    // v1.8.7: 增量触发——保底时间内跳过全量搜索，但复用 cachedExtractors 继续采集
     SapExtractorCandidate extractors[MAX_EXTRACTORS] = {};
-    size_t extractorCount = SearchSapExtractors(ctx->spatialIndex, ctx->position, extractors, MAX_EXTRACTORS);
+    size_t extractorCount = 0;
+    DWORD now = GetTickCount();
+    bool needScan = true;
+
+    if (G::lastFullScanTick != 0) {
+        DWORD sinceLastScan = now - G::lastFullScanTick;
+        if (sinceLastScan < G::HARVEST_BACKSTOP_MS) {
+            needScan = false;
+        }
+    }
+
+    if (needScan) {
+        extractorCount = SearchSapExtractors(ctx->spatialIndex, ctx->position, extractors, MAX_EXTRACTORS);
+        G::lastFullScanTick = now;
+        // 缓存搜索结果供保底路径复用
+        g_cachedExtractorCount = extractorCount < 64 ? extractorCount : 64;
+        for (size_t k = 0; k < g_cachedExtractorCount; ++k) {
+            g_cachedExtractors[k] = extractors[k];
+        }
+    } else {
+        // 保底路径：复用缓存的提取器列表，不搜索但继续采集
+        extractorCount = g_cachedExtractorCount;
+        for (size_t k = 0; k < extractorCount && k < MAX_EXTRACTORS; ++k) {
+            extractors[k] = g_cachedExtractors[k];
+        }
+    }
 
     if (extractorCount > 0) {
         size_t start = G::extractorRotateOffset % extractorCount;
@@ -2215,6 +2252,7 @@ static void PumpHud() {
 // AOB 扫描（从 aobscan.h 引入）
 // ============================================================
 #include "aobscan.h"
+#include "selfverify.h"
 
 
 // ============================================================
@@ -2261,9 +2299,13 @@ static void PollInput() {
 #endif
 
     // ---- 采集周期 ----
+    // v1.8.7: 修复 DWORD 无符号溢出——原 now+2500 方案使 now-(now+2500) 下溢为巨大值立即触发
     if (G::runMode == G::RunMode::AutoRun) {
         DWORD now = GetTickCount();
-        if (now - G::lastHarvestTick >= G::HARVEST_INTERVAL_MS) {
+        if (G::lastHarvestTick == 0) {
+            // 首次：设置当前时间，本轮跳过（延迟到下个 5s 周期），与 ProductionAuto 错开
+            G::lastHarvestTick = now;
+        } else if (now - G::lastHarvestTick >= G::HARVEST_INTERVAL_MS) {
             G::lastHarvestTick = now;
             WorldContext ctx = {};
             if (GetWorldContext(&ctx)) {

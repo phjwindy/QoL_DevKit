@@ -1,8 +1,3 @@
-// ================================================
-// 作者：PHJ&消失的清风
-// 项目：Village in the Shade QoL MOD Pack
-// 转载或分享时请注明出处
-// ================================================
 // scarecrow.cpp —— 稻草人与洒水器重叠 (v1.0.3)
 //
 // v1.0.3: SEH 保护 g_currentWorldKey/g_resolveGeometryStatus；发布版关闭日志。
@@ -28,6 +23,7 @@
 #include <cstring>
 
 #include "logging.h"
+#include "memory_cache.h"  // v1.0.2: FastRegion 区域缓存
 #include "selfverify.h"
 
 // 日志开关：发布版禁用日志输出
@@ -134,17 +130,7 @@ static bool WriteMem(void* target, const void* data, size_t size) {
 }
 
 static bool IsReadable(const void* pointer, size_t size) {
-    if (!pointer || size == 0) return false;
-    uintptr_t start = reinterpret_cast<uintptr_t>(pointer);
-    if (start < 0x10000 || start > 0x00007FFFFFFFFFFFULL) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery(pointer, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
-    uintptr_t regionStart = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    uintptr_t regionEnd = regionStart + mbi.RegionSize;
-    if (start + size < start || start + size > regionEnd) return false;
-    return true;
+    return qol_mem::IsReadable(pointer, size);
 }
 
 static bool SealExecutableMemory(void* address, size_t size) {

@@ -1,8 +1,9 @@
-// sickleharvest.cpp — SickleHarvest MOD for Village in the Shade v1.09 (v2.2.2)
+// sickleharvest.cpp — SickleHarvest MOD for Village in the Shade v1.09 (v2.3.0)
 // 镰刀范围收割：挥镰刀时一次性收割范围内所有成熟田地作物 + 果树
-// v2.2.1: IsReadable 加 16 槽区域缓存（从 ChestSort 移植），挥镰刀时 3250+ 目标
-//         的 VirtualQuery 系统调用从 10000+ 次降至 ~16 次。logging.cpp ASCII 快速路径。
-// v2.2.2: 去重从 O(N²) 线性扫描改为 unordered_set 哈希集合（3250+ 目标时
+// v2.3.0: 代码审计修复——①HarvestSettle 循环加 SEH 保护（崩溃时恢复 savedTarget）；
+//         ②FastRegionReset 提前到 native 调用之前（detour 期间用干净缓存）；
+//         ③HarvestSettle 加 8ms 帧预算（大农场 100+ 作物时不卡顿，超出部分跳过）。
+// v2.2.2: 去重从 O(N²) 线性扫描改为 unordered_set 哈希集合
 //         约 10M 次比较 → O(1) 查找）；移除 item_ctor / HarvestSettle 诊断
 //         被动记录 hook（v2.2.0 已验证转正，收割逻辑不再需要诊断捕获）。
 // v1.1.1: 修正 getTargetCrops RVA 0x23B110→0x23B710（原地址为辅助函数，真正函数在 +0x600 处）
@@ -1084,7 +1085,37 @@ static bool __fastcall CropsActionCheckDetour(
     }
     return harvestResult;
 
+}
 
+
+// v2.3.0/P1-8+P2-10: HarvestSettle 批处理辅助函数（独立函数避免 C2712 对象展开限制）
+// SEH 包裹防崩溃 + 8ms 帧预算防卡顿
+static void RunHarvestSettleBatch(const u64* harvestLandIDs, size_t harvestCount,
+                                   u64* actionTarget, void* sickleState) {
+    LARGE_INTEGER budgetStart, budgetFreq;
+    QueryPerformanceCounter(&budgetStart);
+    QueryPerformanceFrequency(&budgetFreq);
+    const LONGLONG budgetLimit = budgetFreq.QuadPart / 125;  // 8ms
+    size_t harvestedActual = 0;
+    __try {
+        for (size_t i = 0; i < harvestCount; ++i) {
+            if ((i & 15) == 15) {
+                LARGE_INTEGER now;
+                QueryPerformanceCounter(&now);
+                if (now.QuadPart - budgetStart.QuadPart > budgetLimit) {
+                    Log("[SickleHarvest] HarvestSettle 超 8ms 预算，已处理 %zu/%zu",
+                        harvestedActual, harvestCount);
+                    break;
+                }
+            }
+            *actionTarget = harvestLandIDs[i];
+            g_harvestSettle(sickleState);
+            ++harvestedActual;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[SickleHarvest] HarvestSettle 异常 0x%X at index %zu",
+            GetExceptionCode(), harvestedActual);
+    }
 }
 
 static RawPointerVector* __fastcall GetSickleTargetCropsDetour(
@@ -1098,6 +1129,7 @@ static RawPointerVector* __fastcall GetSickleTargetCropsDetour(
     g_harvestFallbackStatusCount = 0;
     g_shakeTreeFallbackStatusCount = 0;
     g_insideSickleTargetQuery = true;
+    FastRegionReset();  // v2.3.0/P2-11: 提前到 native 调用前，detour 期间用干净缓存
     Log("[SickleHarvest] CALL originalGetTargetCrops\n");
     RawPointerVector* result = g_originalGetSickleTargetCrops(sickleState, targets);
     g_insideSickleTargetQuery = false;
@@ -1152,7 +1184,7 @@ if (!result) {
 
     // v1.4.0-diag: ScoutGimmicks 已移除——v1.3.0 实测木耳不在 spatialSearch 索引中
 
-    // 重置区域缓存：每次挥镰刀处理前清空，避免跨帧残留旧区域
+    // 重置区域缓存：每次挥镰刀处理前清空（v2.3.0 已提前到 native 调用前，此处保留冗余重置确保干净）
     FastRegionReset();
 
     Log("[SickleHarvest] PROCESS START targets=%zu\n", targetCount);
@@ -1346,10 +1378,8 @@ if (!result) {
     g_insideSickleHarvest = true;
     if (harvestCount > 0 && actionTarget) {
         const u64 savedTarget = *actionTarget;
-        for (size_t i = 0; i < harvestCount; ++i) {
-            *actionTarget = harvestLandIDs[i];
-            g_harvestSettle(sickleState);
-        }
+        // v2.3.0/P1-8+P2-10: SEH 包裹 + 帧预算（提取到辅助函数避免 C2712）
+        RunHarvestSettleBatch(harvestLandIDs.data(), harvestCount, actionTarget, sickleState);
         *actionTarget = savedTarget;
     }
 

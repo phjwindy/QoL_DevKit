@@ -1,8 +1,3 @@
-// ================================================
-// 作者：PHJ&消失的清风
-// 项目：Village in the Shade QoL MOD Pack
-// 转载或分享时请注明出处
-// ================================================
 #include "version_manifest.h"
 #include <windows.h>
 #include <wincrypt.h>
@@ -24,10 +19,12 @@ using u32 = std::uint32_t;
 // 日志（QoL_Shared）
 // ============================================================
 #include "logging.h"
+#include "memory_cache.h"  // v1.1.27: FastRegion 区域缓存
 #include "selfverify.h"
 
-// ProductionAuto 日志开关：发布版禁用日志
-// #define PRODUCTIONAUTO_LOGGING  // 诊断版启用日志
+// ProductionAuto 日志开关：发布版关闭日志
+// v1.1.28b-diag: 临时开启排查链式失效（v1.1.29 已修复，关闭）
+// #define PRODUCTIONAUTO_LOGGING
 #ifdef PRODUCTIONAUTO_LOGGING
   // 使用 QoL_Shared 的日志系统（logging.h 真实实现）
 #else
@@ -81,17 +78,7 @@ static HMODULE g_module = nullptr;
 // IsReadable -- 内存可读检查（与 dinput8.cpp 一致）
 // ============================================================
 static bool IsReadable(const void* pointer, size_t size) {
-    if (!pointer || size == 0) return false;
-    uintptr_t start = reinterpret_cast<uintptr_t>(pointer);
-    if (start < 0x10000 || start > 0x00007FFFFFFFFFFFULL) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery(pointer, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
-    uintptr_t regionStart = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    uintptr_t regionEnd = regionStart + mbi.RegionSize;
-    if (start + size < start || start + size > regionEnd) return false;
-    return true;
+    return qol_mem::IsReadable(pointer, size);
 }
 
 // ============================================================
@@ -743,7 +730,7 @@ static void ProductionHudRefresh();
 //   1. .inl 所需的全部外部依赖桩函数
 //   2. GameClock 发布器（hook CGameTime::advance 主世界调用点，发布游戏时间）
 //   3. AutoPet 桩函数（空实现，仅维持编译）
-// 版本：1.1.21，适配 build 25094764 (v1.09)
+// 版本：1.1.28b，适配 build 25094764 (v1.09)
 //
 // .inl 在文件尾部按依赖顺序 #include 引入。
 

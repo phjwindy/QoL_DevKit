@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'bdb5a396-b16c-4b39-a8dc-918e6233862b'
-  PropagateID: 'bdb5a396-b16c-4b39-a8dc-918e6233862b'
-  ReservedCode1: 'abadbfbc-7929-49b0-a023-e07a59140205'
-  ReservedCode2: 'abadbfbc-7929-49b0-a023-e07a59140205'
+  ProduceID: 'd39a2a60-c87c-40a8-94c9-f111686e6f80'
+  PropagateID: 'd39a2a60-c87c-40a8-94c9-f111686e6f80'
+  ReservedCode1: 'f7714344-8c56-4ce6-86a5-41dd2e571bb4'
+  ReservedCode2: 'f7714344-8c56-4ce6-86a5-41dd2e571bb4'
 ---
 
 # QoL of Village — 静谧田园生活质量 MOD 合集
@@ -33,6 +33,7 @@ GitHub：https://github.com/phjwindy/QoL_of_Village
 | Scarecrow | 稻草人与洒水器重叠——允许两者放置在同一格，不再冲突 |
 | SickleHarvest | 镰刀范围收割——挥一次镰刀收割范围内所有成熟作物，果树自动摇树，木耳也能收 |
 | Sower | 范围播种——按数字键 5 切换 1x1/3x3/5x5/连通播种模式 |
+| AutoPet | 自动抚摸动物——靠近家畜自动抚摸，每日每只限一次 |
 
 ---
 
@@ -48,10 +49,11 @@ QoL_DevKit_Git/
 ├── steam_api64_README.md   基座说明文档
 ├── embed_hash.py           DLL 篡改自校验：编译后哈希嵌入工具
 └── source/
-    ├── QoL_Shared/        共享框架（8 个模块，所有 MOD 复用）
+    ├── QoL_Shared/        共享框架（9 个模块，所有 MOD 复用）
     ├── PluginTemplate/    新 MOD 脚手架模板
     ├── AutoFish/          自动钓鱼
     ├── AutoHarvest/       树液自动收集
+    ├── AutoPet/           自动抚摸动物
     ├── ChestSort/         箱子快速归类
     ├── EyeFix/            结局后保持正常眼
     ├── ModManager/        游戏内 MOD 开关管理器
@@ -99,15 +101,16 @@ bool ok = qol::SafeCallOutBool1(g_someFunc, status, &code);
 | MOD | 功能 | 当前版本 | 状态 |
 |-----|------|----------|------|
 | AutoFish | 钓鱼小游戏自动完成+循环抛竿+垃圾排除 | v1.4.0 | 已验证 |
-| AutoHarvest | F4 收集范围内树液提取器树液 | v1.8.4 | 已验证 |
+| AutoHarvest | F4 收集范围内树液提取器树液 | v1.8.7 | 已验证 |
+| AutoPet | 靠近家畜自动抚摸，每日每只限一次 | v0.5.2 | 已验证 |
 | ChestSort | 数字键 4 触发箱子内物品自动归类 | v1.3.4 | 已验证 |
 | EyeFix | 数字键 0 切换：结局眼↔正常眼 | v1.1.2 | 已验证 |
 | ModManager | F2 面板管理 MOD 开关，手柄 L1+R1 | v1.1.4 | 已验证 |
-| MonsterMark | 夜间自动标记鬼鼠/宝箱/书籍/齿轮 | v1.0.28 | 已验证 |
-| ProductionAuto | F5 切 HUD，自动投料/收料/设备绑定 | v1.1.25 | 已验证 |
+| MonsterMark | 夜间自动标记鬼鼠/宝箱/书籍/齿轮 | v1.0.26 | 已验证 |
+| ProductionAuto | F5 切 HUD，自动投料/收料/设备绑定 | v1.1.28 | 已验证 |
 | Scarecrow | 稻草人与洒水器可放置在同一格 | v1.0.3 | 已验证 |
-| SickleHarvest | 挥镰刀范围收割成熟作物+果树摇树+木耳 | v2.2.4 | 已验证 |
-| Sower | 数字键 5 切换 1x1/3x3/5x5/连通播种 | v1.3.3 | 已验证 |
+| SickleHarvest | 挥镰刀范围收割成熟作物+果树摇树+木耳 | v2.3.0 | 已验证 |
+| Sower | 数字键 5 切换 1x1/3x3/5x5/连通播种 | v1.3.1 | 已验证 |
 
 ## 安装说明
 

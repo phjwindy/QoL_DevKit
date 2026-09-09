@@ -1,10 +1,9 @@
-// ================================================
-// 作者：PHJ&消失的清风
-// 项目：Village in the Shade QoL MOD Pack
-// 转载或分享时请注明出处
-// ================================================
-// chestsort.cpp —— 箱子快速归类 (v1.3.2)
+// chestsort.cpp —— 箱子快速归类 (v1.3.4)
 //
+// v1.3.4: 引用计数审计修复——①Level 1 正常完全合并路径补 InterlockedDecrement
+//         释放保护性 AddRef（原仅 intrusiveRelease 释放背包引用，泄漏 +1）；②统一所有
+//         "从背包移除"路径的释放顺序为先 Decrement(保护性) 再 Release(背包)，确保
+//         独占引用时 Release 触发最终析构。
 // v1.3.2: RVA prologue 验证——AOB 扫描定位函数后读回首字节确认有效函数序言。
 // v1.3.1: 引用计数泄漏修复——部分转移路径(L1387)补 InterlockedDecrement，
 //         与 !anyMoved 路径一致，防止保护性 AddRef 引用永不回收。
@@ -1405,14 +1404,59 @@ static void DoSort(WorldContext* ctx) {
 
         // 合并完成后处理背包槽位
         if (anyMoved && remaining == 0) {
-            // 合并到 0 后清空背包槽位
-            int sourceAfter = 0;
-            if (ReadStackCount(item, &sourceAfter) && sourceAfter == 0) {
+            // 物品已全部转移（Level 1 合并到 0 或 Level 3 新建堆）
+            // v1.3.1-bugfix: Level 3 路径已在 L1368 清空背包槽 + L1372 释放背包引用，
+            //   此时 ReadStackCount 返回原始 stackCount（≠0），不走 CAS 清空分支。
+            //   但保护性 AddRef（L1217）未释放 → 需在此补释放。
+            //
+            // v1.3.1-bugfix: Level 1 完全合并路径，itemAdjust(item, -moveCount)
+            //   将 stackCount 减到 0。但如果 itemAdjust 有内部自动释放逻辑
+            //   （stack→0 时 release），或 stackCount 变为负值/越界值，
+            //   ReadStackCount 会返回 false → 原代码跳过 CAS 清空 + 释放，
+            //   导致背包槽位悬空（指向已耗尽物品）+ 保护性 AddRef 泄漏。
+            //   修复：无论 ReadStackCount 是否成功，都必须清空背包槽位 + 释放保护性 AddRef。
+            int sourceAfter = -1;
+            bool countOk = ReadStackCount(item, &sourceAfter);
+            if (countOk && sourceAfter == 0) {
+                // 正常路径：stackCount=0，清空背包槽
+                // v1.3.4/P0-4+P1-7: 先 Decrement(保护性AddRef) 再 Release(背包引用)，
+                //   统一释放顺序——Decrement 先减保护引用，Release 再减背包引用
+                //   若 refcount→0 则 Release 内部触发析构
                 void* observed = InterlockedCompareExchangePointer(
                     reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
                 if (observed == item) {
+                    InterlockedDecrement(reinterpret_cast<volatile LONG*>(
+                        reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
                     void* slotOwnedRef = item;
                     if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);
+                }
+                movedStacks++;
+            } else if (!countOk || sourceAfter != 0) {
+                // v1.3.1-bugfix: ReadStackCount 失败或返回非 0（Level 3 整物品移走 / itemAdjust 内部释放）
+                // 物品已不在背包有效状态，强制清空背包槽位 + 释放保护性 AddRef
+                // Level 3 路径：背包槽位已在 L1368 清空，此处 CAS 会返回 nullptr（已清），跳过 release
+                // Level 1 异常路径：背包槽位仍指向物品，此处 CAS 清空 + 释放保护性 AddRef
+                void* observed = InterlockedCompareExchangePointer(
+                    reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
+                if (observed == item) {
+                    // v1.3.4/P1-7: 先 Decrement(保护性) 再 Release(背包引用)，统一顺序
+                    InterlockedDecrement(reinterpret_cast<volatile LONG*>(
+                        reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
+                    void* slotOwnedRef = item;
+                    if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);
+                }
+                // 无论 CAS 是否成功（Level 3 已清空的情况），都释放保护性 AddRef
+                if (observed != item) {
+                    // Level 3 路径：背包槽已清空，此处只需释放保护性 AddRef
+                    InterlockedDecrement(reinterpret_cast<volatile LONG*>(
+                        reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
+                }
+                if (!countOk) {
+                    Log("[ChestSort] [bugfix] ReadStackCount 失败，强制清空背包槽: itemId=%llu (箱内已合并)",
+                        (unsigned long long)info.itemId);
+                } else {
+                    // sourceAfter != 0：Level 3 整物品已移入箱子，保护性 AddRef 需释放
+                    // 不记日志（正常 Level 3 路径）
                 }
                 movedStacks++;
             }

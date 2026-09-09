@@ -437,10 +437,20 @@ static constexpr float PRODUCTION_AUTOLINK_RADIUS_SQ =
 // without a panel trigger.  10 seconds balances responsiveness (a newly placed
 // chest is picked up within 10 s + 5 s settle) against scan cost (~350 ms).
 static constexpr ULONGLONG PRODUCTION_AUTOLINK_SCAN_INTERVAL_MS = 20000;
+// v1.1.26: the periodic timer is now a maximum backstop, not the primary
+// trigger.  The primary trigger is the declared-count change detector
+// (g_productionLastScanDeclaredCount) which fires immediately when the
+// player places or removes a gimmick.  The backstop ensures positions are
+// re-evaluated at least every 60 s even if nothing changes.
+static constexpr ULONGLONG PRODUCTION_AUTOLINK_SCAN_BACKSTOP_MS = 60000;
+static std::atomic<ULONGLONG> g_productionAutoLinkLastScanTick{0};
+// v1.1.26: tracks the declared gimmick count from the last completed scan.
+// The periodic check compares this with the live declared count; if they
+// match and the backstop has not elapsed, the scan is skipped entirely.
+static std::atomic<size_t> g_productionLastScanDeclaredCount{0};
 // A chest must be stationary for this many milliseconds before it is
 // included in the flood-fill and becomes eligible for auto-binding.
 static constexpr ULONGLONG PRODUCTION_CHEST_SETTLE_MS = 5000;
-static std::atomic<ULONGLONG> g_productionAutoLinkLastScanTick{0};
 
 // Track whether a binding was created by the chain auto-linker.  This field is
 // packed into the existing ProductionBinding struct below.
@@ -1187,6 +1197,42 @@ static u64 ProductionExtendStableIdentityHash(
     return hash;
 }
 
+// Read only the gimmickId (first 8 bytes of data) without the module
+// string.  This is the fast-path filter: 1 ProductionReadPointer +
+// 1 NearbyIsReadable + 1 dereference.  Use ProductionIsMachineId to
+// skip ~90% of registry objects that are neither machines nor (from
+// the ID alone) distinguishable as chests/floors.
+static bool ProductionReadGimmickIdOnly(void* status, u64* gimmickId) {
+    void* holder = nullptr;
+    void* data = nullptr;
+    if (!status || !gimmickId ||
+        !ProductionReadPointer(status, PRODUCTION_GIMMICK_DATA_OFFSET, &holder) ||
+        !ProductionReadPointer(holder, 0, &data) ||
+        !NearbyIsReadable(data, sizeof(u64))) return false;
+    const u64 id = *reinterpret_cast<const u64*>(data);
+    if (!id) return false;
+    *gimmickId = id;
+    return true;
+}
+
+// Read the module string from the gimmick data block.  Assumes the
+// caller already has a valid data pointer or uses the internal
+// holder→data indirection.
+static bool ProductionReadGimmickModule(void* status, char* module,
+                                        size_t moduleSize) {
+    void* holder = nullptr;
+    void* data = nullptr;
+    if (!status || !module || moduleSize < 2 ||
+        !ProductionReadPointer(status, PRODUCTION_GIMMICK_DATA_OFFSET, &holder) ||
+        !ProductionReadPointer(holder, 0, &data) ||
+        !NearbyIsReadable(data, GIMMICK_MODULE_NAME_OFFSET + sizeof(void*)))
+        return false;
+    const char* modulePointer = *reinterpret_cast<const char* const*>(
+        reinterpret_cast<const unsigned char*>(data) +
+        GIMMICK_MODULE_NAME_OFFSET);
+    return ProductionReadCString(modulePointer, module, moduleSize);
+}
+
 static bool ProductionReadGimmickType(void* status, u64* gimmickId,
                                       char* module, size_t moduleSize) {
     void* holder = nullptr;
@@ -1323,12 +1369,40 @@ static bool ProductionIsChestModule(const char* module) {
 static bool ProductionReadObject(void* status,
                                  ProductionObjectSnapshot* output,
                                  bool deepNameValidation = true,
-                                 bool readOutputMaps = true) {
+                                 bool readOutputMaps = true,
+                                 const ProductionStableId* preReadIdentity = nullptr,
+                                 u64 preReadGimmickId = 0,
+                                 const char* preReadModule = nullptr,
+                                 bool skipRevalidation = false) {
     if (!status || !output) return false;
     ProductionObjectSnapshot value = {};
-    if (!ProductionReadGimmickIdentity(status, &value.id) ||
-        !ProductionReadGimmickType(status, &value.gimmickId, value.module,
-                                   sizeof(value.module))) return false;
+    if (preReadIdentity) {
+        value.id = *preReadIdentity;
+    } else {
+        if (!ProductionReadGimmickIdentity(status, &value.id)) return false;
+    }
+    // Fast-path: if the caller already read the gimmickId, use it to
+    // decide whether the full module string read is worthwhile.
+    if (preReadGimmickId) {
+        value.gimmickId = preReadGimmickId;
+        if (preReadModule) {
+            // Full module string was also pre-read.
+            strncpy_s(value.module, sizeof(value.module), preReadModule,
+                      _TRUNCATE);
+        } else {
+            // Only the ID was pre-read.  For non-machine IDs we still
+            // need the module to check chest/floor.  But first check
+            // if the ID alone is a machine — if not, the module read
+            // is needed; if it is, the full type check still requires
+            // the module string.
+            if (!ProductionReadGimmickModule(status, value.module,
+                                             sizeof(value.module)))
+                return false;
+        }
+    } else {
+        if (!ProductionReadGimmickType(status, &value.gimmickId, value.module,
+                                       sizeof(value.module))) return false;
+    }
     value.chest = ProductionIsChestModule(value.module);
     value.machine = ProductionIsMachineType(value.gimmickId, value.module);
     value.floor = (!value.chest && !value.machine &&
@@ -1394,15 +1468,19 @@ static bool ProductionReadObject(void* status,
 
     // The registry reference protects lifetime, not identity reuse or a
     // concurrent CString/type mutation.  Revalidate before publishing values.
-    ProductionStableId identityAgain = {};
-    u64 gimmickIdAgain = 0;
-    char moduleAgain[PRODUCTION_MAX_MODULE_BYTES + 1] = {};
-    if (!ProductionReadGimmickIdentity(status, &identityAgain) ||
-        !ProductionIdEqual(value.id, identityAgain) ||
-        !ProductionReadGimmickType(status, &gimmickIdAgain, moduleAgain,
-                                   sizeof(moduleAgain)) ||
-        gimmickIdAgain != value.gimmickId ||
-        strcmp(moduleAgain, value.module) != 0) return false;
+    // v1.1.27: skipRevalidation=true for scan loop (registry stable during scan,
+    // prefix hash detects changes), saves a full identity+type re-read per object.
+    if (!skipRevalidation) {
+        ProductionStableId identityAgain = {};
+        u64 gimmickIdAgain = 0;
+        char moduleAgain[PRODUCTION_MAX_MODULE_BYTES + 1] = {};
+        if (!ProductionReadGimmickIdentity(status, &identityAgain) ||
+            !ProductionIdEqual(value.id, identityAgain) ||
+            !ProductionReadGimmickType(status, &gimmickIdAgain, moduleAgain,
+                                       sizeof(moduleAgain)) ||
+            gimmickIdAgain != value.gimmickId ||
+            strcmp(moduleAgain, value.module) != 0) return false;
+    }
 
     NearbyRawPointerVector items = {};
     if (value.chest && NearbyReadRawInventory(status, &items)) {
@@ -7531,12 +7609,67 @@ static void ProductionOnMainThreadUpdate() {
     // Chain automation: periodically request a scan so positions are re-
     // evaluated even without a panel/hotkey trigger.  The exchange below
     // picks up the periodic request alongside any manual one.
+    //
+    // v1.1.26 optimization: instead of blindly firing every 20 s, use an
+    // incremental trigger.  Peek at the live declared count (cheap: 1
+    // pointer dereference + 1 u64 read) and only trigger a full scan when
+    // the count changed since the last completed scan (player placed/removed
+    // a gimmick) OR the 60 s backstop has elapsed.  This eliminates ~2/3 of
+    // all-periodic scans during normal play where nothing changed.
     if (g_productionWorldContextActive.load(std::memory_order_acquire)) {
         const ULONGLONG now = GetTickCount64();
         ULONGLONG lastScan =
             g_productionAutoLinkLastScanTick.load(std::memory_order_acquire);
-        if (now - lastScan >= PRODUCTION_AUTOLINK_SCAN_INTERVAL_MS) {
-            if (g_productionAutoLinkLastScanTick.compare_exchange_strong(
+        const ULONGLONG elapsed = now - lastScan;
+        const bool backstopReached =
+            elapsed >= PRODUCTION_AUTOLINK_SCAN_BACKSTOP_MS;
+        // Quick peek: read the save pointer and declared count without
+        // entering a full scan.  If this fails (save not ready), fall back
+        // to the old timer-based trigger.
+        bool declaredChanged = false;
+        if (backstopReached) {
+            declaredChanged = true;  // force scan
+        } else {
+            // Peek at the declared count.  This is a best-effort check;
+            // any failure means we fall back to the interval timer.
+            const uintptr_t base =
+                reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+            void* root = nullptr;
+            void* save = nullptr;
+            if (ProductionReadPointer(
+                    reinterpret_cast<void*>(base + RVA_GAME_ROOT), 0, &root) &&
+                ProductionReadPointer(root, PRODUCTION_SAVE_OFFSET, &save) &&
+                NearbyIsReadable(save, sizeof(void*)) &&
+                *reinterpret_cast<const uintptr_t*>(save) ==
+                    base + RVA_PRODUCTION_SAVE_DATA_VTABLE &&
+                NearbyIsReadable(reinterpret_cast<unsigned char*>(save) +
+                                     PRODUCTION_GIMMICK_LIST_OFFSET,
+                                 sizeof(void*) + sizeof(u64))) {
+                const u64 liveDeclared = *reinterpret_cast<const u64*>(
+                    reinterpret_cast<unsigned char*>(save) +
+                    PRODUCTION_GIMMICK_LIST_OFFSET + sizeof(void*));
+                const size_t lastDeclared = g_productionLastScanDeclaredCount
+                    .load(std::memory_order_acquire);
+                declaredChanged =
+                    (static_cast<size_t>(liveDeclared) != lastDeclared);
+            } else {
+                // Save not readable; fall back to interval timer.
+                if (elapsed >= PRODUCTION_AUTOLINK_SCAN_INTERVAL_MS) {
+                    declaredChanged = true;
+                }
+            }
+        }
+        if (declaredChanged) {
+            // v1.1.29: Don't request a restart while a scan is already in
+            // progress.  A yield keeps g_productionScanInProgress=true; the
+            // scan resumes from the saved cursor on the next callback.
+            // Requesting a restart here would reset the cursor to 0 (L7754)
+            // and lose all batch progress, creating an infinite restart loop
+            // that never reaches ProductionAutoLinkBindings (L8000) and thus
+            // never creates any bindings (enabled_bindings=0).
+            if (!g_productionScanInProgress.load(
+                    std::memory_order_acquire) &&
+                g_productionAutoLinkLastScanTick.compare_exchange_strong(
                     lastScan, now, std::memory_order_acq_rel)) {
                 g_productionRegistryScanRequested.store(
                     true, std::memory_order_release);
@@ -7778,8 +7911,29 @@ static void ProductionOnMainThreadUpdate() {
                    PRODUCTION_REGISTRY_INDEX_CACHE_CAPACITY) {
             ++g_productionScanRegistryIndexCount;
         }
+        // --- Fast-path filter (v1.1.26 optimization) ---
+        // Read only the gimmickId (1 ptr deref + 1 IsReadable) and use
+        // ProductionIsMachineId to skip ~90% of registry objects that
+        // are neither machines.  For non-machine IDs, still read the
+        // module string inside ProductionReadObject to check chest/floor,
+        // but skip the expensive identity re-read by passing preReadIdentity.
+        u64 quickGimmickId = 0;
+        const bool haveQuickId =
+            ProductionReadGimmickIdOnly(status, &quickGimmickId);
+        // If we have a valid ID and it's not a machine ID, we still need
+        // to check if it's a chest or floor (which requires module string).
+        // But if the ID IS a machine ID, we can skip the module read in
+        // the fast path — ProductionReadObject will read it for the full
+        // type check.  Either way, ProductionReadObject handles it.
         ProductionObjectSnapshot value = {};
-        if (ProductionReadObject(status, &value)) {
+        // v1.1.27→v1.1.28: readOutputMaps 仅对 machine 对象保留 true（被动机械
+        // 如蜂箱/树液采集器依赖 output map 判定 OutputReady），chest/floor 跳过
+        // 以减少 map 查找。skipRevalidation 回退为 false（v1.1.28b: true 导致链式绑定失效）。
+        const bool isMachineId = haveQuickId && ProductionIsMachineId(quickGimmickId);
+        if (ProductionReadObject(status, &value, true, isMachineId,
+                                 &batchIdentity,
+                                 haveQuickId ? quickGimmickId : 0,
+                                 nullptr, false)) {
             if (value.machine) ++g_productionScanMachineCount;
             if (value.chest && value.named) ++g_productionScanNamedChestCount;
             if (g_productionScanObjectCount < PRODUCTION_MAX_OBJECT_SNAPSHOTS)
@@ -8073,6 +8227,10 @@ static void ProductionOnMainThreadUpdate() {
     g_productionScanExpected = 0;
     g_productionScanResumeNode = nullptr;
     g_productionScanResumePrev = nullptr;
+    // v1.1.26: record the declared count from this completed scan so the
+    // incremental trigger can detect changes on the next periodic check.
+    g_productionLastScanDeclaredCount.store(expectedCount,
+                                            std::memory_order_release);
     // Log only after mod-owned state and the recursion latch are reset.  This
     // closes the exact evidence gap in the reported frozen build.
     ProductionLog(
@@ -8659,7 +8817,7 @@ static bool InstallProductionAutomation() {
     g_productionReady.store(true, std::memory_order_release);
     ProductionLog(
         "[PRODAUTO] seq=%llu txn=0 event=install result=PASS "
-        "reason=none version=v1.1.23 "
+        "reason=none version=v1.1.29 "
         "schema=1 recipe_rows=%zu machine_types=29 "
         "recipe_catalog_sha256=%s all_map_registry=1 "
         "gimmick_status_vtables=primary_secondary_rtti "
