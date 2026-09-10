@@ -1,4 +1,4 @@
-// autopet.cpp —— 自动抚摸动物（AutoPet v0.5.2）
+// autopet.cpp —— 自动抚摸动物（AutoPet v0.5.4）
 //
 // v0.5.1: 改为跨日触发——读 save+0x3270 (raw_second) 判断天数变化，
 //         睡觉跨日后 caress 被原生重置为 0，此时执行一次性抚摸。
@@ -90,7 +90,7 @@
 // ============================================================
 // 版本常量（build 25094764 / v1.09）
 // ============================================================
-static constexpr const char* AUTOPET_VERSION = "v0.5.2";
+static constexpr const char* AUTOPET_VERSION = "v0.5.4";
 
 // ImageBase（PE 默认）
 static constexpr uintptr_t IMAGE_BASE = 0x140000000;
@@ -127,7 +127,8 @@ namespace rva {
     // 参考实现 BigL233 auto_pet.inl L147: AUTO_PET_LIVESTOCK_LIST_OFFSET = 0x3430
     // save = root+0x208（与 ChestSort 的 player 同一指针，因为 player = save 对象）
     static constexpr uintptr_t LIVESTOCK_LIST_OFFSET = 0x3430;
-    static constexpr size_t MAX_LIVESTOCK_LIST = 256;  // 链表节点上限
+    static constexpr size_t MAX_LIVESTOCK_LIST = 256;  // 链表节点上限（游戏限制 ~128 只）
+    static constexpr int MAX_PET_CANDIDATES = 256;     // v0.5.4: 候选数组容量 32→128（用户上百只动物只摸 32 只）
 
     // v0.5.1: 游戏时间（save+0x3270 = raw_second，int64）
     // dayId = rawSecond / 86400，跨日时 caress 被原生重置为 0
@@ -739,7 +740,7 @@ static HWND g_petHudWindow = nullptr;
 static HFONT g_petHudFont = nullptr;
 static int g_petHudTotal = 0;
 static int g_petHudPetted = 0;
-static ULONGLONG g_petHudHideAt = 0;  // v0.5.2: 自动隐藏计时
+static ULONGLONG g_petHudHideAt = 0;  // v0.5.4: 自动隐藏计时
 
 static LRESULT CALLBACK PetHudWndProc(HWND window, UINT message,
                                       WPARAM wParam, LPARAM lParam) {
@@ -769,7 +770,7 @@ static LRESULT CALLBACK PetHudWndProc(HWND window, UINT message,
         HFONT oldFont = (HFONT)SelectObject(dc, g_petHudFont);
         SetTextColor(dc, RGB(220, 225, 230));
 
-        // "已抚摸 N/M 只动物" (v0.5.2: 修正 抚=U+629A)
+        // "已抚摸 N/M 只动物" (v0.5.4: 修正 抚=U+629A)
         wchar_t buf[64];
         int len = swprintf_s(buf, 64, L"\x5DF2\x629A\x6478 %d/%d \x53EA\x52A8\x7269",
                              g_petHudPetted, g_petHudTotal);
@@ -842,7 +843,7 @@ static void PetHudUpdate(DWORD durationMs = 5000) {
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(g_petHudWindow, nullptr, TRUE);
     UpdateWindow(g_petHudWindow);
-    g_petHudHideAt = GetTickCount64() + durationMs;  // v0.5.2: 设定隐藏时间
+    g_petHudHideAt = GetTickCount64() + durationMs;  // v0.5.4: 设定隐藏时间
 }
 
 static void PetHudPump() {
@@ -852,7 +853,7 @@ static void PetHudPump() {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    // v0.5.2: 超时自动隐藏
+    // v0.5.4: 超时自动隐藏
     if (IsWindowVisible(g_petHudWindow) && g_petHudHideAt != 0 &&
         GetTickCount64() >= g_petHudHideAt) {
         ShowWindow(g_petHudWindow, SW_HIDE);
@@ -872,8 +873,8 @@ static void AutoPetTickImpl() {
     }
 
     // v0.4.6: 改用 livestockList_ 链表遍历（非空间搜索），覆盖牛/马/狗等所有动物
-    PetCandidate candidates[32];
-    int n = CollectNearbyLivestock(ctx.save, ctx.position, candidates, 32);
+    PetCandidate candidates[rva::MAX_PET_CANDIDATES];
+    int n = CollectNearbyLivestock(ctx.save, ctx.position, candidates, rva::MAX_PET_CANDIDATES);
     if (n <= 0) {
         g_petHudTotal = 0;
         g_petHudPetted = 0;
@@ -887,7 +888,7 @@ static void AutoPetTickImpl() {
         SettlePet(&candidates[i]);
     }
 
-    // v0.5.2: HUD 统计——结算后重新读 caress 状态，统计实际已摸数量
+    // v0.5.4: HUD 统计——结算后重新读 caress 状态，统计实际已摸数量
     g_petHudTotal = n;
     g_petHudPetted = 0;
     for (int i = 0; i < n; i++) {
