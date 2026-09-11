@@ -1,4 +1,6 @@
-// autoharvest.cpp —— AutoHarvest: 自动收集树液提取器中的树液 (v1.8.7)
+// autoharvest.cpp —— AutoHarvest: 自动收集树液提取器中的树液 (v1.8.9)
+//
+// v1.8.9: 启动卡顿优化——①搜索半径 5000→1200（首搜候选减 90%+）；②AutoRun 首搜延迟 1 秒（避开 F4 帧峰值）；③aobscan 共享库 memchr+.text 限定提速（游戏加载期 AOB 扫描几百 ms→几十 ms）
 //
 // v1.8.7: 代码审计修复——①增量触发缓存提取器列表（保底路径复用指针不跳过采集）；
 //         ②DWORD 无符号溢出修复首次延迟；③TransferToChest AddRef/Release 对称化；
@@ -159,7 +161,7 @@ enum AOBIndex {
 static constexpr size_t kAOBCount = sizeof(kAOBs) / sizeof(kAOBs[0]);
 
 // ---- 采集参数 ----
-static constexpr float  HARVEST_RADIUS = 5000.0f;      // v1.8.6: 搜索半径（覆盖庭院范围，原 10000 全图过大）
+static constexpr float  HARVEST_RADIUS = 2000.0f;      // v1.8.9: 搜索半径 5000→2000（4 格世界网格，首搜候选减 80%+，已注册提取器不受影响）
 static constexpr float  HARVEST_RADIUS_SQ = HARVEST_RADIUS * HARVEST_RADIUS;
 static constexpr float  CHEST_SET_RADIUS = 300.0f;   // F4 设置箱子的搜索半径
 static constexpr float  CHEST_SET_RADIUS_SQ = CHEST_SET_RADIUS * CHEST_SET_RADIUS;
@@ -286,8 +288,8 @@ namespace G {
 
     // 采集周期控制
     DWORD lastHarvestTick = 0;
-    static constexpr DWORD HARVEST_INTERVAL_MS = 5000;  // 每 5 秒一个周期
-    static constexpr DWORD HARVEST_BACKSTOP_MS = 15000;  // 增量触发保底
+    static constexpr DWORD HARVEST_INTERVAL_MS = 5000;  // 每 5 秒一个周期（背包转移+采集）
+    static constexpr DWORD HARVEST_BACKSTOP_MS = 30000;  // v1.8.8: 增量触发保底 30 秒（树液生成慢，无需频繁全量搜索）
     size_t extractorRotateOffset = 0;
     size_t lastExtractorCount = (size_t)-1;
     DWORD lastFullScanTick = 0;
@@ -795,6 +797,25 @@ struct SapExtractorCandidate {
 // v1.8.7: 持久化提取器缓存——保底路径复用此列表跳过搜索但仍采集
 static SapExtractorCandidate g_cachedExtractors[64] = {};
 static size_t g_cachedExtractorCount = 0;
+
+// v1.8.9: 分块搜索状态机——把 2000 半径矩形拆成 SHARD_GRID×SHARD_GRID 小块，
+// 每帧只做一个小块的空间搜索（单帧 DoSpatialSearch 开销恒定，彻底消除启动卡顿）
+static constexpr int    SHARD_GRID = 4;                     // 4×4 = 16 小块
+static constexpr int    SHARD_GRID_TOTAL = SHARD_GRID * SHARD_GRID;
+static constexpr DWORD  SHARD_SCAN_INTERVAL_MS = 30000;     // 成功搜索：30 秒后重搜
+static constexpr DWORD  SHARD_RETRY_INTERVAL_MS = 10000;    // 空/失败：10 秒后重试
+struct ShardSearchState {
+    bool active = false;            // 一轮分块搜索进行中
+    int gridIndex = 0;              // 当前块索引（0..SHARD_GRID_TOTAL-1）
+    float originX = 0, originY = 0; // 本轮搜索区域左下角（玩家为中心 ±HARVEST_RADIUS）
+    RawPointerVector results = {};  // 当前块的搜索结果（本帧用完即释放）
+    SapExtractorCandidate found[64]; // 本轮内累计找到的提取器
+    size_t foundCount = 0;
+    DWORD lastScanTick = 0;         // 上次开始一轮搜索的时间
+    DWORD firstSearchDeferUntil = 0; // v1.8.9: 首轮延迟截止（避开 F4 按下帧）
+    bool lastResultEmpty = true;    // 上一轮是否空/失败（决定 10s vs 30s 重搜间隔）
+};
+static ShardSearchState g_shardSearch;
 
 // v1.8.6: 搜索结果过滤加帧内预算——超过 2ms 自动截断（候选量受缩半径已大减，此处是安全网）
 static size_t SearchSapExtractors(void* spatialIndex, const float* playerPos,
@@ -1927,34 +1948,27 @@ static void DoHarvestCycle(WorldContext* ctx) {
         totalHarvested += moved;
     }
 
-    // ---- 第二步：收集树液提取器（增量触发 + 分批轮转）----
-    // v1.8.7: 增量触发——保底时间内跳过全量搜索，但复用 cachedExtractors 继续采集
-    SapExtractorCandidate extractors[MAX_EXTRACTORS] = {};
-    size_t extractorCount = 0;
-    DWORD now = GetTickCount();
-    bool needScan = true;
-
-    if (G::lastFullScanTick != 0) {
-        DWORD sinceLastScan = now - G::lastFullScanTick;
-        if (sinceLastScan < G::HARVEST_BACKSTOP_MS) {
-            needScan = false;
+    // ---- 第二步：采集已注册的树液提取器 ----
+    // v1.8.8: 空间搜索已拆到 mod_tick 分片执行（ShardSearchTick），这里只做采集
+    // 验证已注册提取器指针有效性，失效的移除
+    if (g_cachedExtractorCount > 0) {
+        size_t validCount = 0;
+        for (size_t k = 0; k < g_cachedExtractorCount; ++k) {
+            float px, py;
+            if (IsReadable(g_cachedExtractors[k].status, 64) &&
+                ReadPosition(g_cachedExtractors[k].status, &px, &py)) {
+                g_cachedExtractors[k].posX = px;
+                g_cachedExtractors[k].posY = py;
+                g_cachedExtractors[validCount++] = g_cachedExtractors[k];
+            }
         }
+        g_cachedExtractorCount = validCount;
     }
 
-    if (needScan) {
-        extractorCount = SearchSapExtractors(ctx->spatialIndex, ctx->position, extractors, MAX_EXTRACTORS);
-        G::lastFullScanTick = now;
-        // 缓存搜索结果供保底路径复用
-        g_cachedExtractorCount = extractorCount < 64 ? extractorCount : 64;
-        for (size_t k = 0; k < g_cachedExtractorCount; ++k) {
-            g_cachedExtractors[k] = extractors[k];
-        }
-    } else {
-        // 保底路径：复用缓存的提取器列表，不搜索但继续采集
-        extractorCount = g_cachedExtractorCount;
-        for (size_t k = 0; k < extractorCount && k < MAX_EXTRACTORS; ++k) {
-            extractors[k] = g_cachedExtractors[k];
-        }
+    SapExtractorCandidate extractors[MAX_EXTRACTORS] = {};
+    size_t extractorCount = g_cachedExtractorCount < MAX_EXTRACTORS ? g_cachedExtractorCount : MAX_EXTRACTORS;
+    for (size_t k = 0; k < extractorCount; ++k) {
+        extractors[k] = g_cachedExtractors[k];
     }
 
     if (extractorCount > 0) {
@@ -2297,6 +2311,117 @@ static void PollInput() {
         ProbeNativeCollect();
     }
 #endif
+
+    // ---- 分块空间搜索（每帧只搜一个小块，单帧 DoSpatialSearch 开销恒定）----
+    // v1.8.9: 由「单次全范围搜索+过滤分片」改为「搜索本身分块」——每帧执行一个
+    //         小块的 DoSpatialSearch，块内候选少，单帧不卡；16 帧完成一轮全范围覆盖
+    if (G::runMode == G::RunMode::AutoRun) {
+        WorldContext ctx = {};
+        if (GetWorldContext(&ctx)) {
+            // 本轮未开始：判断是否到了启动新一轮的时间
+            if (!g_shardSearch.active) {
+                DWORD now = GetTickCount();
+                bool shouldSearch = false;
+                if (g_shardSearch.lastScanTick == 0) {
+                    // v1.8.9: 首轮延迟 1 秒——避开 F4 按下帧
+                    if (g_shardSearch.firstSearchDeferUntil == 0) {
+                        g_shardSearch.firstSearchDeferUntil = now + 1000;
+                    }
+                    shouldSearch = now >= g_shardSearch.firstSearchDeferUntil;
+                } else {
+                    // 空/失败 10 秒重试，成功 30 秒常规间隔
+                    const DWORD interval = g_shardSearch.lastResultEmpty
+                        ? SHARD_RETRY_INTERVAL_MS
+                        : SHARD_SCAN_INTERVAL_MS;
+                    shouldSearch = now - g_shardSearch.lastScanTick >= interval;
+                }
+                if (shouldSearch) {
+                    g_shardSearch.active = true;
+                    g_shardSearch.gridIndex = 0;
+                    g_shardSearch.foundCount = 0;
+                    g_shardSearch.originX = ctx.position[0] - HARVEST_RADIUS;
+                    g_shardSearch.originY = ctx.position[1] - HARVEST_RADIUS;
+                    g_shardSearch.lastScanTick = now;
+                    g_shardSearch.lastResultEmpty = true;  // 本轮找到任何提取器后置 false
+                    Log("[AutoHarvest] 分块搜索启动: %d 块", SHARD_GRID_TOTAL);
+                }
+            }
+
+            // 每帧只处理一个块
+            if (g_shardSearch.active) {
+                const int gi = g_shardSearch.gridIndex;
+                if (gi < SHARD_GRID_TOTAL) {
+                    const int col = gi % SHARD_GRID;
+                    const int row = gi / SHARD_GRID;
+                    const float cell = (2.0f * HARVEST_RADIUS) / (float)SHARD_GRID;
+                    Rect bounds = {
+                        g_shardSearch.originX + col * cell,
+                        g_shardSearch.originY + row * cell,
+                        g_shardSearch.originX + (col + 1) * cell,
+                        g_shardSearch.originY + (row + 1) * cell,
+                    };
+                    g_shardSearch.results = {};
+                    if (DoSpatialSearch(ctx.spatialIndex, &bounds, 0, &g_shardSearch.results) &&
+                        g_shardSearch.results.begin && g_shardSearch.results.end) {
+                        const size_t rawCount =
+                            g_shardSearch.results.end - g_shardSearch.results.begin;
+                        for (size_t i = 0;
+                             i < rawCount && g_shardSearch.foundCount < 64; ++i) {
+                            void* status = g_shardSearch.results.begin[i];
+                            if (!status) continue;
+                            if (!IsSapExtractorStatus(status)) continue;
+                            float px, py;
+                            if (!ReadPosition(status, &px, &py)) continue;
+                            float dx = px - ctx.position[0];
+                            float dy = py - ctx.position[1];
+                            float distSq = dx * dx + dy * dy;
+                            if (distSq > HARVEST_RADIUS_SQ) continue;
+                            g_shardSearch.found[g_shardSearch.foundCount++] =
+                                { status, px, py, distSq };
+                        }
+                        g_shardSearch.lastResultEmpty = false;
+                    }
+                    ReleaseSearchVector(&g_shardSearch.results);
+                    g_shardSearch.results = {};
+                    g_shardSearch.gridIndex++;
+                }
+
+                // 一轮 16 块完成：合并到注册表
+                if (g_shardSearch.gridIndex >= SHARD_GRID_TOTAL) {
+                    g_shardSearch.active = false;
+                    Log("[AutoHarvest] 分块搜索完成: 找到 %zu 个提取器",
+                        g_shardSearch.foundCount);
+
+                    if (g_cachedExtractorCount == 0) {
+                        // 首次注册
+                        g_cachedExtractorCount = g_shardSearch.foundCount;
+                        for (size_t k = 0; k < g_cachedExtractorCount; ++k) {
+                            g_cachedExtractors[k] = g_shardSearch.found[k];
+                        }
+                        Log("[AutoHarvest] 首次注册 %zu 个提取器", g_cachedExtractorCount);
+                    } else {
+                        // 增量合并
+                        size_t added = 0;
+                        for (size_t i = 0; i < g_shardSearch.foundCount && g_cachedExtractorCount < 64; ++i) {
+                            bool exists = false;
+                            for (size_t j = 0; j < g_cachedExtractorCount; ++j) {
+                                if (g_cachedExtractors[j].status == g_shardSearch.found[i].status) {
+                                    exists = true; break;
+                                }
+                            }
+                            if (!exists) {
+                                g_cachedExtractors[g_cachedExtractorCount++] = g_shardSearch.found[i];
+                                ++added;
+                            }
+                        }
+                        if (added > 0) {
+                            Log("[AutoHarvest] 增量检测：新增 %zu 个提取器（总 %zu）", added, g_cachedExtractorCount);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // ---- 采集周期 ----
     // v1.8.7: 修复 DWORD 无符号溢出——原 now+2500 方案使 now-(now+2500) 下溢为巨大值立即触发

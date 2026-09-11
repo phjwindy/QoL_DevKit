@@ -74,8 +74,8 @@ static constexpr size_t PRODUCTION_MAX_OBJECT_SNAPSHOTS =
     PRODUCTION_MAX_CHESTS + PRODUCTION_MAX_BINDINGS + PRODUCTION_MAX_FLOORS;
 static constexpr size_t PRODUCTION_MAX_NAME_BYTES = 95;
 static constexpr size_t PRODUCTION_MAX_MODULE_BYTES = 47;
-static constexpr size_t PRODUCTION_SCAN_BATCH_OBJECTS = 128;
-static constexpr LONGLONG PRODUCTION_SCAN_BUDGET_US = 2000;
+static constexpr size_t PRODUCTION_SCAN_BATCH_OBJECTS = 1024; // v1.1.33: 128→1024（1025对象1帧完成）
+static constexpr LONGLONG PRODUCTION_SCAN_BUDGET_US = 8000;  // v1.1.33: 2000→8000（每帧8ms预算，60fps下仍有余量）
 static constexpr size_t PRODUCTION_MAX_PARENT_DEPTH = 8;
 static constexpr size_t PRODUCTION_MAX_PARENT_CHILDREN = 4096;
 static constexpr u64 PRODUCTION_DPAD_RIGHT_COMMAND = 0x3fa;
@@ -443,6 +443,8 @@ static constexpr ULONGLONG PRODUCTION_AUTOLINK_SCAN_INTERVAL_MS = 20000;
 // player places or removes a gimmick.  The backstop ensures positions are
 // re-evaluated at least every 60 s even if nothing changes.
 static constexpr ULONGLONG PRODUCTION_AUTOLINK_SCAN_BACKSTOP_MS = 60000;
+static constexpr ULONGLONG PRODUCTION_FIRST_SCAN_DELAY_MS = 10000;  // v1.1.33: 世界激活后 10 秒内不触发自动扫描（避开起床加载峰值）
+static constexpr ULONGLONG PRODUCTION_DECLARED_CHANGE_COOLDOWN_MS = 30000;  // v1.1.33: gimmick 数量变化后 30 秒内不再因数量变化触发扫描（避免跑动时 gimmick 增减导致连续重扫）
 static std::atomic<ULONGLONG> g_productionAutoLinkLastScanTick{0};
 // v1.1.26: tracks the declared gimmick count from the last completed scan.
 // The periodic check compares this with the live declared count; if they
@@ -1351,11 +1353,13 @@ static bool ProductionReadMachineSlotLimit(void* machineStatus,
 // machines and chests that are farther apart than PRODUCTION_AUTOLINK_RADIUS.
 // Outdoor floors (GARDEN_FLOOR_*) use gimmick_cobblestones; indoor
 // carpets use gimmick_furniture_carpet_ (s/m/l variants).
+// NOTE (2026-09-10): gimmick_passable_grass (可通行草地) is NOT a bridge
+// node — user explicitly does not want passable grass to link machines
+// and chests across distances.
 static bool ProductionIsFloorModule(const char* module) {
     if (!module) return false;
     return strcmp(module, "gimmick_cobblestones") == 0
-        || strcmp(module, "gimmick_furniture_carpet_") == 0
-        || strcmp(module, "gimmick_passable_grass") == 0;
+        || strcmp(module, "gimmick_furniture_carpet_") == 0;
 }
 
 // Check whether a module name represents a chest-like container.
@@ -7623,6 +7627,12 @@ static void ProductionOnMainThreadUpdate() {
         const ULONGLONG elapsed = now - lastScan;
         const bool backstopReached =
             elapsed >= PRODUCTION_AUTOLINK_SCAN_BACKSTOP_MS;
+        // v1.1.33: 首次扫描延迟——世界刚激活时场景仍在加载，此时全量扫描 1025+
+        // 对象耗时 2.6s+ 导致起床卡顿。等 10 秒让场景加载稳定后再开始自动扫描。
+        const ULONGLONG activeSince = g_productionWorldActiveSince;
+        if (activeSince && now - activeSince < PRODUCTION_FIRST_SCAN_DELAY_MS) {
+            return;  // 世界激活不足 10 秒，跳过自动扫描
+        }
         // Quick peek: read the save pointer and declared count without
         // entering a full scan.  If this fails (save not ready), fall back
         // to the old timer-based trigger.
@@ -7660,7 +7670,16 @@ static void ProductionOnMainThreadUpdate() {
             }
         }
         if (declaredChanged) {
-            // v1.1.29: Don't request a restart while a scan is already in
+            // v1.1.33: gimmick 数量变化触发后加 30 秒冷却，避免跑动时 gimmick
+            // 增减（季节状态变化/树木加载）导致 4 秒间隔连续重扫。
+            // backstop（60s）仍可突破冷却，保证位置最终会被重新评估。
+            if (!backstopReached && lastScan > 0 &&
+                now - lastScan < PRODUCTION_DECLARED_CHANGE_COOLDOWN_MS) {
+                declaredChanged = false;  // 冷却期内，忽略数量变化
+            }
+        }
+        if (declaredChanged) {
+            // v1.1.31: Don't request a restart while a scan is already in
             // progress.  A yield keeps g_productionScanInProgress=true; the
             // scan resumes from the saved cursor on the next callback.
             // Requesting a restart here would reset the cursor to 0 (L7754)
@@ -8817,7 +8836,7 @@ static bool InstallProductionAutomation() {
     g_productionReady.store(true, std::memory_order_release);
     ProductionLog(
         "[PRODAUTO] seq=%llu txn=0 event=install result=PASS "
-        "reason=none version=v1.1.29 "
+        "reason=none version=v1.1.33 "
         "schema=1 recipe_rows=%zu machine_types=29 "
         "recipe_catalog_sha256=%s all_map_registry=1 "
         "gimmick_status_vtables=primary_secondary_rtti "

@@ -381,19 +381,19 @@ static NightExactAnchorSearchFunc g_nightAnchorSearchDirect = nullptr;
 using NightMapHashLookupFunc = void* (__fastcall *)(void*, uint64_t);
 static NightMapHashLookupFunc g_nightMapHashLookup = nullptr;
 static std::atomic<u64> g_nightAnchorScanCounter{0};
-static constexpr u64 NIGHT_ANCHOR_SCAN_INTERVAL = 60;
+// v1.0.29: interval=1（每次打开地图都重扫）。之前 60 导致首次扫描拿到
+// 部分结果后 59 次不更新，书/齿轮拾取点缺失。昼夜过滤已保证只在夜晚扫描，
+// 每次开地图都刷新 0x1C1A00 结果确保拾取点完整。
+static constexpr u64 NIGHT_ANCHOR_SCAN_INTERVAL = 1;
 // v1.0.25: 记录上次扫描的 areaId，玩家跨区域（地图切换）时强制重扫
 static u64 g_nightAnchorScannedAreaId = ~u64{0};
 
 // Progressive (batched) anchor scan: instead of scanning all 112 anchors in
-// one frame (~11ms blocking), process NIGHT_ANCHOR_BATCH_SIZE per frame.
-// At 60fps the full scan completes in 14 frames (~233ms) with <1ms per frame.
+// one frame, process NIGHT_ANCHOR_BATCH_SIZE per frame.
+// v1.0.29: batch=112（一帧完成）。每个 0x1C1A00 调用是哈希表查找（微秒级），
+// 112 次约 1-2ms，不会丢帧。之前注释说的 11ms 是 NightCollectTargets 空间搜索
+// 的开销，不是锚点扫描。改为一帧完成避免开关多次地图才完整显示的问题。
 static constexpr size_t NIGHT_ANCHOR_TOTAL = 112;  // 62 books + 50 parts
-// v1.0.18: batch size = NIGHT_ANCHOR_TOTAL so the ENTIRE scan completes
-// in a single frame.  The previous batch=8 approach required 14 frames
-// (14 map opens) to finish, but users typically open the map once or
-// twice, so progressive_scan_complete never fired and cached[N] dump was
-// never output.
 static constexpr size_t NIGHT_ANCHOR_BATCH_SIZE = 112;
 struct NightProgressiveScanState {
     void* mapObj;
@@ -1517,12 +1517,28 @@ static void NightBuildCollectedSet() {
         const int32_t itemNum = *reinterpret_cast<int32_t*>(
             reinterpret_cast<uintptr_t>(subObj) +
             NIGHT_GIMMICK_ITEM_NUMBER_OFFSET);
-        if (itemNum < 0 ||
-            itemNum + 1 >= static_cast<int32_t>(NIGHT_COLLECTED_MAX))
-            continue;
         const uint64_t flagIdx2 = *reinterpret_cast<uint64_t*>(
             reinterpret_cast<uintptr_t>(subObj) +
             NIGHT_GIMMICK_FLAG_IDX2_OFFSET);
+        // v1.0.29: 诊断——在 itemNum 过滤之前检测齿轮条目
+        // 齿轮的 flagIdx1 应在 24100-24149 范围，或 itemNum >= 63
+        if (!s_dumpedEntries && (flagIdx1 >= 24100 || itemNum >= 63)) {
+            const bool collected = nightFlagSet(flagIdx1);
+            const bool placed = (flagIdx2 == 0) || nightFlagSet(flagIdx2);
+            Log("[NightMapMarkers][diag] NON-BOOK entry[%zu] itemNum=%d "
+                "flagIdx1=%llu flagIdx2=%llu collected=%d placed=%d "
+                "f2bit=%d\n",
+                i, itemNum,
+                static_cast<unsigned long long>(flagIdx1),
+                static_cast<unsigned long long>(flagIdx2),
+                static_cast<int>(collected),
+                static_cast<int>(placed),
+                static_cast<int>(flagIdx2 != 0 ?
+                    (nightFlagSet(flagIdx2) ? 1 : 0) : -1));
+        }
+        if (itemNum < 0 ||
+            itemNum + 1 >= static_cast<int32_t>(NIGHT_COLLECTED_MAX))
+            continue;
         const bool collected = nightFlagSet(flagIdx1);
         // v1.0.20: flagIdx2 is the placement flag (proven by capstone
         // disasm of 0x265570).  flagIdx2==0 means unconditionally placed.
@@ -1542,6 +1558,18 @@ static void NightBuildCollectedSet() {
         }
         if (flagIdx1 == 0)
             continue;
+        // v1.0.29: 诊断——检测齿轮是否在存档列表中
+        // 如果 flagIdx1 在 24100-24149 范围，说明齿轮条目存在，可读 flagIdx2
+        if (flagIdx1 >= 24100 && flagIdx1 < 24150) {
+            Log("[NightMapMarkers][diag] GEAR entry found! itemNum=%d "
+                "flagIdx1=%llu flagIdx2=%llu placed=%d f2bit=%d\n",
+                itemNum,
+                static_cast<unsigned long long>(flagIdx1),
+                static_cast<unsigned long long>(flagIdx2),
+                static_cast<int>(placed),
+                static_cast<int>(flagIdx2 != 0 ?
+                    (nightFlagSet(flagIdx2) ? 1 : 0) : -1));
+        }
         if (collected) {
             g_nightBookCollected[itemNum + 1] = true;
             ++bookCollectedCount;
@@ -1594,6 +1622,179 @@ static void NightBuildCollectedSet() {
             entryCount, bookCollectedCount, bookPlacedCount,
             gearCollectedCount, gearPlacedCount);
     }
+}
+
+// v1.0.29: 精简版活体枚举——只搜 0xE1C168 一个 callback，不调 destroy
+// 日志验证 0xE1C168 是唯一命中书/齿轮的 callback，其他 43 个全是空且可能有副作用
+// 不调 vtable[4] destroy 避免破坏游戏对象引用计数
+static void NightCollectLiveNightItemsSafe(void* /*mapInfo*/) {
+    memset(g_nightLiveItems, 0, sizeof(g_nightLiveItems));
+    const uintptr_t base = reinterpret_cast<uintptr_t>(
+        GetModuleHandleW(nullptr));
+
+    void* root = nullptr;
+    void* mapOwner = nullptr;
+    void* mapInfoObj = nullptr;
+    void* spatialOwner = nullptr;
+    if (!NightReadPointer(reinterpret_cast<void*>(base + RVA_GAME_ROOT), 0,
+                          &root) || !root ||
+        !NightReadPointer(root, NIGHT_ROOT_MAP_OWNER_OFFSET, &mapOwner) ||
+        !mapOwner ||
+        !NightReadPointer(mapOwner, NIGHT_MAP_INFO_OFFSET, &mapInfoObj) ||
+        !mapInfoObj ||
+        !NightReadPointer(mapInfoObj, NIGHT_MAP_SPATIAL_OWNER_OFFSET,
+                          &spatialOwner) || !spatialOwner) {
+        return;
+    }
+    void* spatialIndex = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(spatialOwner) +
+        NIGHT_MAP_SPATIAL_INDEX_OFFSET);
+    if (!NightIsReadable(spatialIndex, 0x48)) return;
+
+    const NightRect bounds = *reinterpret_cast<const NightRect*>(
+        reinterpret_cast<uintptr_t>(spatialIndex) + 0x10);
+    if (!std::isfinite(bounds.minimumX) || !std::isfinite(bounds.minimumY) ||
+        !std::isfinite(bounds.maximumX) || !std::isfinite(bounds.maximumY) ||
+        bounds.minimumX > bounds.maximumX ||
+        bounds.minimumY > bounds.maximumY) {
+        return;
+    }
+    if (!g_nightSpatialSearch || !g_nightRawVectorFree) return;
+    if (!g_nightMapAreaResolver || !g_nightLiveAreaResolver) return;
+
+    u64 playerAreaId = 0;
+    NightAreaSource playerAreaSource = NightAreaSource::None;
+    float playerWorldX = 0.0f;
+    float playerWorldY = 0.0f;
+    if (!NightResolvePlayerArea(base, root, &playerAreaId,
+                                &playerAreaSource,
+                                &playerWorldX, &playerWorldY)) {
+        return;
+    }
+
+    // v1.0.30: 遍历全部 NIGHT_DIAG_CALLBACKS（47 个 callback），不调 destroy。
+    // 之前只搜 0xE1C168 一个 callback 只命中 4 书 + 15 齿轮，而锚点缓存有
+    // 29 个（9 书 + 20 齿轮），19 个锚点因"活体未找到"被跳过（用户反馈
+    // 标识 3/4 没显示）。遍历全部 callback 可覆盖完整活体枚举，不调
+    // destroy 避免破坏游戏状态（完整版 44 个 callback + destroy 会致
+    // 关闭地图后画面异常）。hit 子集留日志确认。
+
+    size_t bookCount = 0;
+    size_t gearCount = 0;
+    size_t hitCallbacks = 0;
+    size_t areaRejected = 0;
+    size_t disabledRejected = 0;
+
+    for (size_t ci = 0; ci < NIGHT_DIAG_CALLBACK_COUNT; ++ci) {
+        const uint32_t vtableRva = NIGHT_DIAG_CALLBACKS[ci];
+
+        NightPointerVector results = {};
+        u64 filterId = 0;
+        NightSearchCallback callback = {};
+        *reinterpret_cast<void**>(callback.storage) =
+            reinterpret_cast<void*>(base + vtableRva);
+        *reinterpret_cast<u64**>(callback.storage + 0x08) = &filterId;
+        *reinterpret_cast<NightPointerVector**>(callback.storage + 0x10) =
+            &results;
+        callback.target = callback.storage;
+
+        __try {
+            g_nightSpatialSearch(spatialIndex, &bounds, &callback, -1, -1);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            NightReleaseSearchVector(&results);
+            continue;
+        }
+
+        // 不调 destroy，直接读结果然后释放结果向量
+
+        const uintptr_t rBegin = reinterpret_cast<uintptr_t>(results.begin);
+        const uintptr_t rEnd = reinterpret_cast<uintptr_t>(results.end);
+        const uintptr_t rCap = reinterpret_cast<uintptr_t>(results.capacity);
+        const bool vectorOk = (!rBegin && !rEnd && !rCap) ||
+            (rBegin && rEnd >= rBegin && rCap >= rEnd &&
+             (rEnd - rBegin) % sizeof(void*) == 0 &&
+             (rCap - rBegin) % sizeof(void*) == 0);
+        const size_t resultCount = vectorOk && rBegin
+            ? static_cast<size_t>((rEnd - rBegin) / sizeof(void*)) : 0;
+
+        bool hitThis = false;
+        for (size_t oi = 0; oi < resultCount; ++oi) {
+            void* s = results.begin[oi];
+            if (!s || !NightIsReadable(s, sizeof(void*))) continue;
+
+            u64 bid = 0;
+            void* holder = nullptr;
+            if (NightReadPointer(s, 0x240, &holder) && holder) {
+                void* data = nullptr;
+                if (NightReadPointer(holder, 0, &data) && data &&
+                    NightIsReadable(data, sizeof(u64))) {
+                    bid = *reinterpret_cast<const u64*>(data);
+                }
+            }
+
+            size_t slot = static_cast<size_t>(-1);
+            if (bid >= NIGHT_BOOK_BASEID_FIRST &&
+                bid < NIGHT_BOOK_BASEID_FIRST + 62) {
+                slot = static_cast<size_t>(bid - NIGHT_BOOK_BASEID_FIRST);
+            } else if (bid >= NIGHT_GEAR_BASEID_FIRST &&
+                       bid < NIGHT_GEAR_BASEID_FIRST + 50) {
+                slot = 62 + static_cast<size_t>(bid - NIGHT_GEAR_BASEID_FIRST);
+            }
+            if (slot >= NIGHT_ANCHOR_TOTAL || g_nightLiveItems[slot].found)
+                continue;
+
+            // enabled 检查
+            if (NightIsReadable(reinterpret_cast<void*>(
+                    reinterpret_cast<uintptr_t>(s) +
+                    NIGHT_CREATURE_ENABLED_OFFSET), 1) &&
+                *reinterpret_cast<const unsigned char*>(
+                    reinterpret_cast<uintptr_t>(s) +
+                    NIGHT_CREATURE_ENABLED_OFFSET) == 0) {
+                ++disabledRejected;
+                continue;
+            }
+
+            float pos[4] = {0, 0, 0, 0};
+            if (NightIsReadable(reinterpret_cast<void*>(
+                    reinterpret_cast<uintptr_t>(s) +
+                    NIGHT_CREATURE_POSITION_OFFSET), sizeof(float) * 4)) {
+                const float* p = reinterpret_cast<const float*>(
+                    reinterpret_cast<uintptr_t>(s) +
+                    NIGHT_CREATURE_POSITION_OFFSET);
+                pos[0] = p[0]; pos[1] = p[1];
+                pos[2] = p[2]; pos[3] = p[3];
+            }
+            if (!std::isfinite(pos[0]) || !std::isfinite(pos[1])) continue;
+
+            // 同区域检查
+            u64 itemAreaId = 0;
+            NightAreaSource itemAreaSource = NightAreaSource::None;
+            if (!NightResolveAreaId(s, pos, &itemAreaId, &itemAreaSource) ||
+                itemAreaId != playerAreaId) {
+                ++areaRejected;
+                continue;
+            }
+
+            g_nightLiveItems[slot].found = true;
+            memcpy(g_nightLiveItems[slot].worldPos, pos, sizeof(float) * 4);
+            if (slot < 62) ++bookCount;
+            else ++gearCount;
+            hitThis = true;
+        }
+
+        NightReleaseSearchVector(&results);
+        if (hitThis) {
+            ++hitCallbacks;
+            Log("[NightMapMarkers][filter] live hit cb=0x%X (books=%zu "
+                "gears=%zu)\n", vtableRva, bookCount, gearCount);
+        }
+    }
+
+    Log("[NightMapMarkers][filter] live_safe books=%zu gears=%zu "
+        "callbacks=%zu hitCallbacks=%zu areaRejected=%zu "
+        "disabledRejected=%zu\n",
+        bookCount, gearCount, NIGHT_DIAG_CALLBACK_COUNT, hitCallbacks,
+        areaRejected, disabledRejected);
 }
 
 // v1.0.10: enumerate live books/gears via the SHARED SPATIAL INDEX,
@@ -1667,11 +1868,9 @@ static void NightCollectLiveNightItems(void* /*mapInfo*/) {
         return;
     }
 
-    // Callback hit cache: once a callback has produced a book/gear it is
-    // trusted forever (the spatial index contents are the same every night
-    // since only baseIDs change).
-    static bool s_hitCallbacks[NIGHT_DIAG_CALLBACK_COUNT] = {};
-    static size_t s_hitCount = 0;
+    // v1.0.29: 移除 s_hitCallbacks 永久缓存——每次都搜索所有 callback
+    // 之前未命中的 callback 会被永久跳过，导致漏检今晚新生成的书/齿轮
+    static size_t s_hitCount = 0;  // 保留用于首次诊断日志
 
     size_t searchedCallbacks = 0;
     size_t bookCount = 0;
@@ -1680,7 +1879,6 @@ static void NightCollectLiveNightItems(void* /*mapInfo*/) {
     size_t disabledRejected = 0;
 
     for (size_t ci = 0; ci < NIGHT_DIAG_CALLBACK_COUNT; ++ci) {
-        if (s_hitCount != 0 && !s_hitCallbacks[ci]) continue;
         ++searchedCallbacks;
         const uint32_t vtableRva = NIGHT_DIAG_CALLBACKS[ci];
 
@@ -1837,22 +2035,11 @@ static void NightCollectLiveNightItems(void* /*mapInfo*/) {
             }
         }
 
-        if (hitThis && !s_hitCallbacks[ci]) {
-            s_hitCallbacks[ci] = true;
-            ++s_hitCount;
-            Log("[NightMapMarkers][filter] live hit cb=0x%X "
-                "(books=%zu gears=%zu hitCount=%zu)\n",
-                vtableRva, bookCount, gearCount, s_hitCount);
-        }
-
         // v1.0.10: first-scan per-callback diagnostic
-        if (firstScan) {
-            Log("[NightMapMarkers][filter] live cb=0x%X searched=%d "
-                "count=%zu samples=[%llu,%llu,%llu]\n",
-                vtableRva, searched ? 1 : 0, resultCount,
-                static_cast<unsigned long long>(sampleBids[0]),
-                static_cast<unsigned long long>(sampleBids[1]),
-                static_cast<unsigned long long>(sampleBids[2]));
+        if (firstScan && hitThis) {
+            Log("[NightMapMarkers][filter] live hit cb=0x%X "
+                "(books=%zu gears=%zu)\n",
+                vtableRva, bookCount, gearCount);
         }
 
         NightReleaseSearchVector(&results);
@@ -1934,8 +2121,8 @@ static void NightScanAnchors(void* mapInfo, u64 playerAreaId) {
             return;
         }
 
-        // v1.0.21: no collected/placed filter — show all anchors.
-        // NightBuildCollectedSet() call removed.
+        // v1.0.29: 恢复 collected/placed 过滤——只显示未收集 && 今晚放置的锚点
+        NightBuildCollectedSet();
 
         // Start a new progressive scan
         g_nightProgressive.mapObj = mapObj;
@@ -1958,23 +2145,28 @@ static void NightScanAnchors(void* mapInfo, u64 playerAreaId) {
     while (idx < NIGHT_ANCHOR_TOTAL &&
            processed < NIGHT_ANCHOR_BATCH_SIZE &&
            cached < NIGHT_ANCHOR_CACHE_CAPACITY) {
-        // v1.0.21: removed collected/placed filtering.  Show ALL book/gear
-        // anchor positions on the map unconditionally.  The 0x1C1A00 found
-        // flag is the only filter — it rejects anchors that don't exist on
-        // the current map resource.
         int itemNum = 0;
         if (idx < 62) {
-            // Lost book (0-based idx = 1-based anchor number)
             itemNum = static_cast<int>(idx + 1);
             _snprintf_s(anchorName, sizeof(anchorName), _TRUNCATE,
                          "pop_lost_book%02d", itemNum);
         } else {
-            // Machine part
             itemNum = static_cast<int>(idx - 62 + 1);
             _snprintf_s(anchorName, sizeof(anchorName), _TRUNCATE,
                          "pop_machine_part%02d", itemNum);
         }
+
+        // v1.0.34: 只过滤已收集——书/齿轮全部显示（不区分今晚是否放置）。
+        // placed 标志不可靠（齿轮无 placed 数据，书的 flagIdx2 是模板级
+        // 标志），用户选择"全部显示"方案：0x1C1A00 found 锚点全标。
+        bool isCollected = false;
+        if (idx < 62) {
+            isCollected = g_nightBookCollected[itemNum];
+        } else {
+            isCollected = g_nightGearCollected[itemNum];
+        }
         ++idx;
+        if (isCollected) continue;
 
         // v1.0.15: query 0x1C1A00 for the anchor's world coordinates --
         // the same function the game's own placement code (0x2657F0) uses.
@@ -2042,6 +2234,24 @@ static void NightScanAnchors(void* mapInfo, u64 playerAreaId) {
     }
 }
 
+// v1.0.29: 昼夜判断——读 raw_second 判断当前是否白天
+// save = [exe + 0x10D4950], raw_second = [save + 0x3270] (int64)
+// hour = (rawSecond % 86400) / 3600, 白天 = 06:00~18:00
+static bool NightIsDaytime(uintptr_t exeBase) {
+    void* savePtr = *reinterpret_cast<void**>(exeBase + RVA_NIGHT_SAVE_DATA_PTR);
+    if (!savePtr) return false;  // 读不到就不过滤（放行夜间搜索）
+    int64_t rawSecond = 0;
+    __try {
+        rawSecond = *reinterpret_cast<int64_t*>(
+            reinterpret_cast<unsigned char*>(savePtr) + 0x3270);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;  // SEH 异常时不过滤
+    }
+    if (rawSecond < 0) return false;
+    int hour = static_cast<int>((rawSecond % 86400) / 3600);
+    return (hour >= 6 && hour < 18);
+}
+
 static void __fastcall NightMapRedrawDetour(void* mapTask) {
     if (!g_originalNightMapRedraw) return;
     const DWORD threadId = GetCurrentThreadId();
@@ -2062,6 +2272,17 @@ static void __fastcall NightMapRedrawDetour(void* mapTask) {
         g_originalNightMapRedraw(mapTask);
         return;
     }
+
+    // v1.0.29: 昼夜过滤——白天不执行夜间标记空间搜索
+    {
+        const uintptr_t exeBase =
+            reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (NightIsDaytime(exeBase)) {
+            g_originalNightMapRedraw(mapTask);
+            return;
+        }
+    }
+
     g_insideNightMapRedraw = true;
     NightMarkerTarget targets[NIGHT_MAX_TARGETS] = {};
     int ghostRatCount = 0;
@@ -2107,7 +2328,10 @@ static void __fastcall NightMapRedrawDetour(void* mapTask) {
         if (NightReadPointer(reinterpret_cast<void*>(base + RVA_GAME_ROOT), 0, &root) &&
             NightReadPointer(root, NIGHT_ROOT_MAP_OWNER_OFFSET, &mapOwner) &&
             NightReadPointer(mapOwner, NIGHT_MAP_INFO_OFFSET, &mapInfo)) {
-            NightScanAnchors(mapInfo, diagnostics.playerAreaId);
+            // v1.0.35: 停用书/齿轮锚点标记——0x1C1A00 无法区分"锚点有定义"
+            // 与"今晚实际生成"，用户实测仍有空标。暂不显示书/齿轮，
+            // 只保留幽灵鼠/宝箱标记。待未来逆向"实际生成物列表"后再恢复。
+            // NightScanAnchors(mapInfo, diagnostics.playerAreaId);
         }
     }
 
@@ -2183,22 +2407,29 @@ static void __fastcall NightMapRedrawDetour(void* mapTask) {
                sizeof(float) * 4);
         combined[existingCount + i] = &fakeStamps[i];
     }
-    // Append anchor-cached targets (books, machine parts)
+    // Append anchor-cached book/gear targets (0x1C1A00 coordinates).
+    // v1.0.33: 回归锚点缓存绘制。诊断证实活体枚举（0xE1C168）读到的
+    // baseID/坐标不是书/齿轮实体——baseID 490400000-003 对应 book01-04，
+    // 但 placed 表说今晚生成的是 book06/21/24/...，编号对不上；坐标与
+    // 0x1C1A00 锚点偏移几百到几千。0xE1C168 历史注释已警告"对书/齿轮
+    // 返回 0"。0x1C1A00 是游戏放置逻辑 0x2657F0 同款查询，坐标可靠。
+    // collected/placed 过滤已在 NightScanAnchors 中完成。
     size_t anchorStampCount = 0;
     const size_t anchorCacheCount = g_nightAnchorCacheCount.load(
         std::memory_order_relaxed);
     for (size_t ai = 0; ai < anchorCacheCount; ++ai) {
         if (!g_nightAnchorCache[ai].valid) continue;
-        const float* wp = g_nightAnchorCache[ai].worldPos;
-        if (!std::isfinite(wp[0]) || !std::isfinite(wp[1])) continue;
         const char* name = g_nightAnchorCache[ai].name;
         int anchorStampType = -1;
-        if (strncmp(name, "pop_machine_part", 16) == 0)
+        if (strncmp(name, "pop_machine_part", 16) == 0) {
             anchorStampType = NIGHT_STAMP_TYPE_MACHINE_PART;
-        else if (strncmp(name, "pop_lost_book", 13) == 0)
+        } else if (strncmp(name, "pop_lost_book", 13) == 0) {
             anchorStampType = NIGHT_STAMP_TYPE_LOST_BOOK;
-        else
+        } else {
             continue;
+        }
+        const float* wp = g_nightAnchorCache[ai].worldPos;
+        if (!std::isfinite(wp[0]) || !std::isfinite(wp[1])) continue;
         alignas(16) float worldPos[4] = {};
         alignas(16) float mapPos[4] = {};
         memcpy(worldPos, wp, sizeof(worldPos));

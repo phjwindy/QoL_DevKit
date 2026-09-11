@@ -25,6 +25,7 @@ using u32 = std::uint32_t;
 // ProductionAuto 日志开关：发布版关闭日志
 // v1.1.28b-diag: 临时开启排查链式失效（v1.1.29 已修复，关闭）
 // #define PRODUCTIONAUTO_LOGGING
+// #define PRODUCTIONAUTO_LOGGING
 #ifdef PRODUCTIONAUTO_LOGGING
   // 使用 QoL_Shared 的日志系统（logging.h 真实实现）
 #else

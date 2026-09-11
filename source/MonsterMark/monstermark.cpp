@@ -1,6 +1,8 @@
-// monstermark.cpp —— MonsterMark: Ghost Rat / Treasure Box 地图标记 (v1.0.26)
+// monstermark.cpp —— MonsterMark: Ghost Rat / Treasure Box 地图标记 (v1.0.35)
 //
-// v1.0.26: 生产路径 6 处原生函数调用补 SEH 保护（NightCollectTargets 等）。
+// v1.0.35: 停用书/齿轮锚点标记（NightScanAnchors 不再调用）——0x1C1A00
+// 无法区分"锚点有定义"与"今晚实际生成"，用户实测仍有空标（标识 3/4 无
+// 东西）。暂只显示幽灵鼠/宝箱标记。待未来逆向"实际生成物列表"后再恢复。
 //
 // 从 dinput8.cpp 原始 .inl 提取的独立 DLL 插件。
 // 实现逻辑见 night_map_markers.inl（已更新至 build 25094764 v1.09 RVA + byte array）。
@@ -8,7 +10,7 @@
 // 本文件提供 .inl 所需的全部外部依赖桩函数。
 // .inl 在文件末尾通过 #include 引入。
 
-#define MONSTERMARK_VERSION L"v1.0.26"
+#define MONSTERMARK_VERSION L"v1.0.35"
 
 #include <windows.h>
 #include <cstddef>
@@ -31,8 +33,7 @@ using u32 = std::uint32_t;
 #include "logging.h"
 #include "selfverify.h"
 
-// MonsterMark 日志开关：发布版禁用日志
-// 诊断版（F7 callback 暴力扫描）必须开启
+// MonsterMark 日志开关：诊断版开启
 // #define MONSTERMARK_LOGGING
 #ifdef MONSTERMARK_LOGGING
   // 使用 QoL_Shared 的日志系统

@@ -214,6 +214,16 @@ static thread_local bool g_nearbyDpadUpNeedsRelease = true;
 static thread_local ULONGLONG g_nearbyLastMainUpdateAt = 0;
 static thread_local void* g_nearbyLastInput = nullptr;
 
+// v1.1.31: 帧率自适应节流——帧间隔突降时跳过辅助逻辑只调原生函数
+// 维护 EMA 帧间隔基线，当前帧间隔比基线高 15ms 以上 → 降级
+// 帧间隔恢复到基线 + 8ms 以内 → 退出降级
+// 这样 60 帧玩家正常游玩不触发（17ms < 17+15=32ms），区域切换突降才触发
+static thread_local double g_nearbyFrameBaselineMs = 0.0;  // EMA 基线
+static thread_local ULONGLONG g_nearbyLastFrameTick = 0;
+static thread_local bool g_nearbyThrottled = false;        // 是否处于降级模式
+static constexpr double NEARBY_THROTTLE_SPIKE_MS = 15.0;  // 突降阈值：比基线高 15ms
+static constexpr double NEARBY_THROTTLE_RECOVERY_MS = 8.0; // 恢复阈值：基线 + 8ms
+
 enum NearbyToastCode : int {
     NEARBY_TOAST_NONE = 0,
     NEARBY_TOAST_SUCCESS = 1,
@@ -659,6 +669,44 @@ static bool NearbyInstallMainHook() {
 }
 
 static bool __fastcall NearbyMainUpdateDetour(void* state, void* updateInfo) {
+    // v1.1.31: 帧率自适应节流——帧间隔突降时跳过辅助逻辑只调原生函数
+    // 跑到新区域时游戏帧率突然下降，此时 detour 的每帧开销会叠加卡顿
+    // 降级模式下只调原生函数，跳过 ProductionAuto/AutoPet 辅助逻辑
+    // 用 EMA 基线 + 突降阈值，适配不同帧率（60fps/165fps 均可）
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (g_nearbyLastFrameTick != 0) {
+            const double frameMs = static_cast<double>(now - g_nearbyLastFrameTick);
+            if (g_nearbyThrottled) {
+                // 降级模式：只看是否恢复（不更新基线，避免被卡顿拉高）
+                if (frameMs < g_nearbyFrameBaselineMs + NEARBY_THROTTLE_RECOVERY_MS) {
+                    g_nearbyThrottled = false;
+                }
+            } else {
+                // 正常模式：更新 EMA 基线
+                if (g_nearbyFrameBaselineMs == 0.0) {
+                    g_nearbyFrameBaselineMs = frameMs;  // 首帧
+                } else {
+                    g_nearbyFrameBaselineMs = g_nearbyFrameBaselineMs * 0.9 + frameMs * 0.1;
+                }
+                // 检测突降
+                if (frameMs > g_nearbyFrameBaselineMs + NEARBY_THROTTLE_SPIKE_MS) {
+                    g_nearbyThrottled = true;
+                }
+            }
+        }
+        g_nearbyLastFrameTick = now;
+
+        // 降级模式：快速路径，只调原生函数
+        if (g_nearbyThrottled) {
+            NearbyMainUpdateFunction original = g_nearbyOriginalMainUpdate.load(
+                std::memory_order_acquire);
+            const bool result = original ? original(state, updateInfo) : false;
+            g_nearbyLastMainUpdateAt = now;
+            return result;
+        }
+    }
+
     const u64 productionCallbackSequence = ProductionBeginMainCallback();
     // A native output helper or status notification may synchronously re-enter
     // this dispatcher.  Nothing except the original game update is eligible in

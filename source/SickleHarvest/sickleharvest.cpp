@@ -104,6 +104,7 @@
 // 日志开关：发布版禁用日志输出
 // 调试时取消注释下行即可开启日志
 // #define SICKLEHARVEST_LOGGING
+// #define SICKLEHARVEST_LOGGING
 #ifdef SICKLEHARVEST_LOGGING
   // 使用 QoL_Shared 的日志系统
 #else

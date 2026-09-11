@@ -1,4 +1,8 @@
-// chestsort.cpp —— 箱子快速归类 (v1.3.4)
+// chestsort.cpp —— 箱子快速归类 (v1.3.5)
+//
+// v1.3.5: 移除 Level 3 CAS 直写箱槽——用户反馈箱内物品消失/分堆异常，
+//         根因是 CAS 直写绕过游戏原生物品管理，游戏不认 CAS 写入的物品。
+//         回归 README 承诺：只往已有同类堆叠叠加，不创建新槽位。
 //
 // v1.3.4: 引用计数审计修复——①Level 1 正常完全合并路径补 InterlockedDecrement
 //         释放保护性 AddRef（原仅 intrusiveRelease 释放背包引用，泄漏 +1）；②统一所有
@@ -68,6 +72,7 @@
 
 // 日志开关：发布版禁用日志输出（不生成 qol_chestsort.log）
 // 如需调试，取消下一行注释即可恢复日志输出
+// #define CHESTSORT_LOGGING
 // #define CHESTSORT_LOGGING
 #ifdef CHESTSORT_LOGGING
 #else
@@ -1266,12 +1271,6 @@ static void DoSort(WorldContext* ctx) {
                 }
                 int space = cap;  // 剩余可放空间
                 if (space <= 0) {
-                    // [diag] 同类堆剩余空间为 0，记录数值，坐实不合并原因
-                    if (!diagLoggedFull) {
-                        diagLoggedFull = true;
-                        Log("[ChestSort] [diag] 箱%zu 同类堆已满: 剩余空间=%d target=%d 待放=%d",
-                            c, cap, targetBefore, remaining);
-                    }
                     continue;  // 此堆已满，找下一个
                 }
 
@@ -1311,101 +1310,16 @@ static void DoSort(WorldContext* ctx) {
         }
 
         // ================================================================
-        // Level 3（条件性）：仅当箱子里有同类满堆 + 有空槽时才新建堆
-        // 解决 v1.2.1 删除 Level 3 导致的：满堆+空位时背包同类物品无法放入
-        // 不同于 v1.2.0 的无条件新建堆，这里只对有同类满堆的箱子新建
+        // v1.3.5: Level 3 已移除——CAS 直写箱槽绕过游戏原生物品管理，
+        // 导致箱内物品不被游戏识别，取出时消失/分堆异常。
+        // 回归 README 承诺：只往已有同类堆叠叠加，不创建新槽位。
+        // 满堆+空位时背包同类物品无法放入是预期行为（安全优先）。
         // ================================================================
-        if (remaining > 0) {
-            for (size_t c = 0; c < G::cachedChestCount && remaining > 0; ++c) {
-                CachedChest& cc = G::cachedChests[c];
-                if (!cc.hasFullMatch) continue;  // 没有同类满堆则不新建
-                if (!cc.itemsBegin) continue;
-                if (!IsReadable(cc.itemsBegin, CHEST_SLOT_COUNT * sizeof(void*))) continue;
-
-                // 找空槽位
-                void** chestSlots = reinterpret_cast<void**>(cc.itemsBegin);
-                for (int s = 0; s < (int)CHEST_SLOT_COUNT && remaining > 0; ++s) {
-                    if (chestSlots[s] != nullptr) continue;  // 非空槽，跳过
-
-                    // v1.3.0: CS-H1/H2 加固——引用计数顺序修正+完整性验证+失败回滚
-                    // 1. 先 AddRef（箱子将持有引用），再 CAS 写入
-                    //    原代码先 CAS 后 AddRef，如果 CAS 成功但 AddRef 前发生
-                    //    异常，箱子持有无引用的物品 → 双重释放风险
-                    InterlockedIncrement(reinterpret_cast<volatile LONG*>(
-                        reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
-
-                    // 2. CAS 写入箱子空槽
-                    void* observed = InterlockedCompareExchangePointer(
-                        reinterpret_cast<void* volatile*>(&chestSlots[s]), item, nullptr);
-                    if (observed != nullptr) {
-                        // 槽位被抢占，撤销 AddRef
-                        void* ownedRef = item;
-                        if (G::intrusiveRelease) G::intrusiveRelease(&ownedRef);
-                        continue;
-                    }
-
-                    // 3. 完整性验证：写入后读回确认
-                    if (!IsReadable(&chestSlots[s], sizeof(void*)) ||
-                        chestSlots[s] != item) {
-                        // 写入未生效，回滚 CAS
-                        InterlockedCompareExchangePointer(
-                            reinterpret_cast<void* volatile*>(&chestSlots[s]), nullptr, item);
-                        void* ownedRef = item;
-                        if (G::intrusiveRelease) G::intrusiveRelease(&ownedRef);
-                        Log("[ChestSort] CS-H1 验证失败: 写入后读回不一致 (箱%zu 槽%d)", c, s);
-                        continue;
-                    }
-
-                    // 4. 验证物品可读且数量一致
-                    int verifyCount = 0;
-                    if (!ReadStackCount(item, &verifyCount) || verifyCount != remaining) {
-                        // 物品状态异常，回滚
-                        InterlockedCompareExchangePointer(
-                            reinterpret_cast<void* volatile*>(&chestSlots[s]), nullptr, item);
-                        void* ownedRef = item;
-                        if (G::intrusiveRelease) G::intrusiveRelease(&ownedRef);
-                        Log("[ChestSort] CS-H2 验证失败: 物品数量不一致 expected=%d actual=%d (箱%zu 槽%d)",
-                            remaining, verifyCount, c, s);
-                        continue;
-                    }
-
-                    // 5. 从背包槽位移除并释放引用（箱子引用已通过 AddRef 持有）
-                    void* bagObserved = InterlockedCompareExchangePointer(
-                        reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
-                    if (bagObserved == item) {
-                        void* slotOwnedRef = item;
-                        if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);
-                    } else {
-                        // 背包槽位已被其他线程修改，回滚箱子写入
-                        InterlockedCompareExchangePointer(
-                            reinterpret_cast<void* volatile*>(&chestSlots[s]), nullptr, item);
-                        void* ownedRef = item;
-                        if (G::intrusiveRelease) G::intrusiveRelease(&ownedRef);
-                        Log("[ChestSort] CS-H1 回滚: 背包槽位已被修改 (箱%zu 槽%d)", c, s);
-                        continue;
-                    }
-
-                    // 更新缓存：把这个物品记为箱子的新堆
-                    if (cc.itemCount < (int)CHEST_SLOT_COUNT) {
-                        cc.items[cc.itemCount] = { item, info.itemId, info.rank, remaining };
-                        cc.itemCount++;
-                    }
-
-                    movedItems += remaining;
-                    movedStacks++;
-                    Log("[ChestSort] 新建堆(满堆+空槽): itemId=%llu rank=%d x%d (箱%zu 槽%d)",
-                        (unsigned long long)info.itemId, info.rank, remaining, c, s);
-                    remaining = 0;
-                    anyMoved = true;
-                    break;
-                }
-            }
-        }
 
         // 合并完成后处理背包槽位
         if (anyMoved && remaining == 0) {
-            // 物品已全部转移（Level 1 合并到 0 或 Level 3 新建堆）
-            // v1.3.1-bugfix: Level 3 路径已在 L1368 清空背包槽 + L1372 释放背包引用，
+            // 物品已全部转移（Level 1 合并到 0）
+            // v1.3.5: Level 3 已移除，此分支仅处理 Level 1 完全合并
             //   此时 ReadStackCount 返回原始 stackCount（≠0），不走 CAS 清空分支。
             //   但保护性 AddRef（L1217）未释放 → 需在此补释放。
             //
@@ -1432,9 +1346,9 @@ static void DoSort(WorldContext* ctx) {
                 }
                 movedStacks++;
             } else if (!countOk || sourceAfter != 0) {
-                // v1.3.1-bugfix: ReadStackCount 失败或返回非 0（Level 3 整物品移走 / itemAdjust 内部释放）
+                // v1.3.5: Level 3 已移除，此路径仅处理 itemAdjust 内部释放情况
                 // 物品已不在背包有效状态，强制清空背包槽位 + 释放保护性 AddRef
-                // Level 3 路径：背包槽位已在 L1368 清空，此处 CAS 会返回 nullptr（已清），跳过 release
+                // v1.3.5: Level 3 已移除，此分支仅处理 itemAdjust 内部释放
                 // Level 1 异常路径：背包槽位仍指向物品，此处 CAS 清空 + 释放保护性 AddRef
                 void* observed = InterlockedCompareExchangePointer(
                     reinterpret_cast<void* volatile*>(&slots[i]), nullptr, item);
@@ -1445,9 +1359,8 @@ static void DoSort(WorldContext* ctx) {
                     void* slotOwnedRef = item;
                     if (G::intrusiveRelease) G::intrusiveRelease(&slotOwnedRef);
                 }
-                // 无论 CAS 是否成功（Level 3 已清空的情况），都释放保护性 AddRef
+                // v1.3.5: Level 3 已移除，此处 CAS 通常成功（observed == item）
                 if (observed != item) {
-                    // Level 3 路径：背包槽已清空，此处只需释放保护性 AddRef
                     InterlockedDecrement(reinterpret_cast<volatile LONG*>(
                         reinterpret_cast<uintptr_t>(item) + sizeof(void*)));
                 }
